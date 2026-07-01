@@ -66,6 +66,9 @@ milestone. Capturing the official parity fixture is currently a manual
 prerequisite. The repository does not pretend those unfinished pieces are
 production-ready.
 
+For the exact verified VM state, remaining gaps, and continuation order, see
+[Session handoff](docs/HANDOFF.md).
+
 ## Setup
 
 ```bash

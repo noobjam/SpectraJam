@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Data, model weights, and run outputs never belong in Git.
+data/
+artifacts/
+checkpoints/
+runs/
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.parquet
+*.sqlite*
+
+# Keep tiny committed fixtures.
+!tests/fixtures/**

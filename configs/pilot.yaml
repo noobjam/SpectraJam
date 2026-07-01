@@ -1,0 +1,88 @@
+name: spectrajam-pilot
+stage: pilot
+countries: [RWA, ISR]
+
+years:
+  train: [2019, 2021, 2023]
+  validation: [2024]
+  test: [2025]
+
+sampling:
+  mode: stratified_subset
+  points_per_country: 25000
+  lattice_spacing_m: 200
+  min_per_stratum: 200
+  allocation_power: 0.5
+  seed: 20260701
+  spatial_block_km: 20
+  min_distance_m: 200
+  split_ratios:
+    train: 0.8
+    validation: 0.1
+    test: 0.1
+
+extent_policy:
+  RWA:
+    source: world_bank_official_boundaries_v2
+    boundary_path: data/boundaries/rwa.geojson
+    boundary_sha256: REPLACE_BEFORE_SAMPLING
+    ndlsa: exclude
+  ISR:
+    source: world_bank_official_boundaries_v2
+    boundary_path: data/boundaries/isr.geojson
+    boundary_sha256: REPLACE_BEFORE_SAMPLING
+    ndlsa: exclude
+
+strata:
+  primary: [resolve_ecoregion, esa_worldcover_2021]
+  balancing: [elevation_quantile, climate_quantile, valid_observation_quantile]
+
+stac:
+  profile: mpc-v1.1
+  endpoint: https://planetarycomputer.microsoft.com/api/stac/v1
+  collections:
+    s2: sentinel-2-l2a
+    s1: sentinel-1-rtc
+  work_tile_km: 20
+  item_cloud_filter: null
+  retry:
+    max_attempts: 8
+    base_delay_seconds: 1
+    max_delay_seconds: 120
+    lease_seconds: 1800
+
+base_model:
+  version: "1.1"
+  data_source: mpc
+  upstream_commit: d06ee44a053246db3e73f104403f6eaf642e1abf
+  checkpoint_path: checkpoints/tessera_v1_1_mpc_encoder.pt
+  checkpoint_sha256: REPLACE_BEFORE_TRAINING
+  s2_bands: [B04, B02, B03, B08, B8A, B05, B06, B07, B11, B12]
+
+temporal_windows:
+  boundary: half_open
+  minimum_days: 7
+  maximum_days: 365
+  anchor_days: [7, 14, 30, 60, 90, 180, 365]
+  anchor_probability: 0.7
+  prefix_probability: 0.2
+  view_dropout_probability: 0.2
+  evaluation_days: [7, 14, 30, 60, 90, 180, 365]
+  cross_year_policy: same_temporal_split
+  teacher_target: same_window
+  teacher_anchor_full_weight_days: 90
+  teacher_anchor_full_observations: 10
+
+student:
+  model_dim: 256
+  layers: 2
+  heads: 4
+  feedforward_dim: 1024
+  output_dim: 128
+  temporal_view_sizes: [20, 30, 40]
+
+lora:
+  ranks: [4, 8, 16]
+  targets: [attention, attention_ffn]
+  base_anchor_weights: [0.0, 0.1, 0.5]
+  window_conditioner: true

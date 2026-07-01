@@ -46,7 +46,11 @@ def test_s2_baseline_harmonization_is_source_and_date_specific() -> None:
 
 
 def test_s1_amplitude_conversion_matches_upstream_truncation() -> None:
-    values = np.array([0.0, np.nan, 0.01, 0.1, 1.0, 10.0], dtype=np.float32)
+    # Avoid exact integer boundaries such as amplitude=0.01: NumPy/libm builds
+    # can differ by one ULP in float32 log10 there, and upstream then truncates
+    # that result. These values stay away from a boundary while still
+    # distinguishing truncation from rounding.
+    values = np.array([0.0, np.nan, 0.05, 0.5, 1.0, 5.0], dtype=np.float32)
     converted = amplitude_to_mpc_s1(values)
     assert converted.dtype == np.int16
-    assert converted.tolist() == [0, 0, 2000, 6000, 10000, 14000]
+    assert converted.tolist() == [0, 0, 4795, 8795, 10000, 12795]

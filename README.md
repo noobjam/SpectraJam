@@ -67,9 +67,20 @@ those unfinished pieces are production-ready.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[data,train,dev]"
+
+# Ignore corporate/global pip configuration for this shell and use public PyPI.
+export PIP_CONFIG_FILE=/dev/null
+export PIP_INDEX_URL=https://pypi.org/simple
+unset PIP_EXTRA_INDEX_URL
+
+python -m pip install --upgrade pip
+python -m pip install -e ".[data,train,dev]"
 pytest
 ```
+
+If public PyPI still reports a proxy error after these overrides, the VM itself
+does not currently have direct PyPI egress; changing pip configuration alone
+cannot bypass that network policy.
 
 Validate an experiment contract:
 

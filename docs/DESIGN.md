@@ -79,16 +79,21 @@ This is a reproducibility policy, not a legal-status judgment.
 ## 5. STAC acquisition and completeness
 
 Query STAC once per 10–20 km work tile and month/year, not once per point. The
-client consumes all pagination links. It does not impose `eo:cloud_cover < 20`:
-that property summarizes a whole Sentinel tile and is not point validity.
-Per-pixel SCL and upstream-compatible preprocessing determine validity.
+client consumes all pagination links. Query snapshots are immutable and
+resumable, while repeated raw items are content-addressed once. It does not
+impose `eo:cloud_cover < 20`: that property summarizes a whole Sentinel tile
+and is not point validity. Per-pixel SCL and upstream-compatible preprocessing
+determine validity.
 
 The durable ledger declares every expected `(sample_id, modality)` before work
 starts. The implemented generic worker loop uses leases and full-jitter retry.
-The future imagery materializer must add atomic temporary files, validation,
-checksums, and just-in-time MPC signing. It must retry 408, 425, 429, 5xx,
-connection resets, and truncated reads while honoring `Retry-After`; schema
-errors and malformed requests remain terminal.
+The point-store writer publishes immutable Parquet/Zstd shards with exact S2
+`uint16` and S1 scaled-dB `int16` units, returns their SHA-256, and the reader
+can enforce that digest. The future sparse imagery reader must commit those
+digests to the ledger, add just-in-time MPC signing, and use asset-major COG
+block reads. It must retry 408, 425, 429, 5xx, connection resets, and truncated
+reads while honoring `Retry-After`; schema errors and malformed requests remain
+terminal.
 
 Every anchor-year eventually receives one terminal data outcome:
 

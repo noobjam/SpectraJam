@@ -25,6 +25,13 @@ ascending/descending S1 normalization, and distinct MPC/AWS checkpoints. Its
 full executable pretraining recipe is not published, so paper-equivalence must
 not be claimed for v1.1 regional SSL.
 
+The MPC encoder artifact is pinned to Hugging Face repository revision
+`e037fc62cd196f9e05dde4c4104e1383541b41c5`, 230,891,229 bytes, with observed
+SHA-256 `5dab0f070d5711034f7c241e841eaeedb49fef90b9355f68c8f20b9507839ec3`.
+Upstream does not publish a checksum, so this is recorded as an independently
+observed release hash rather than an upstream checksum. The downloader refuses
+to accept an unnoticed artifact replacement.
+
 ## Regional and parameter-efficient adaptation
 
 - [GDA: Parameter Efficient Self-Supervised Geospatial Domain Adaptation](https://openaccess.thecvf.com/content/CVPR2024/papers/Scheibenreif_Parameter_Efficient_Self-Supervised_Geospatial_Domain_Adaptation_CVPR_2024_paper.pdf)

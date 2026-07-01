@@ -12,9 +12,9 @@ are "jammed" into one embedding space. It is playful enough to name a model
 family while still describing the fusion idea. This repository builds and
 tests those encoders; it is not a downstream crop classifier.
 
-Embeddings are not restricted to calendar years. Annual files remain efficient
-storage shards, while the model contract accepts arbitrary half-open windows,
-rolling 7/14-day views, and cumulative coverage prefixes. See
+Embeddings are not restricted to calendar years. Annual Parquet partitions are
+the planned storage shards, while the model contract accepts arbitrary
+half-open windows, rolling 7/14-day views, and cumulative coverage prefixes. See
 [Arbitrary-window embeddings](docs/WINDOWS.md) for the causal training and
 incremental-inference contract.
 
@@ -52,15 +52,19 @@ checkpoint contract. SpectraJam instead pins upstream TESSERA commit
 
 ## Current milestone
 
-This first build contains the experiment contracts, deterministic sampling,
-spatial/temporal split matrix, STAC work-tile discovery, durable retry/resume
-ledger, checkpoint-faithful v1.1 graph, compact student, packed-Q/V LoRA,
-arbitrary-window training, a mask-aware TESSERA runtime, and an exact
-cache/recompute incremental builder. Candidate-frame raster construction,
-upstream-compatible COG materialization, a durable embedding cache, and the
-distributed runner are the next milestone. Capturing the official parity
-fixture is currently a manual prerequisite. The repository does not pretend
-those unfinished pieces are production-ready.
+This build contains the experiment contracts, deterministic sampling,
+spatial/temporal split matrix, content-addressed STAC discovery, durable
+retry/resume ledger, checkpoint-faithful v1.1 graph, compact student,
+packed-Q/V LoRA, arbitrary-window training, a mask-aware TESSERA runtime, and
+an exact cache/recompute incremental builder. It also implements the primitives
+for a checksum-pinned checkpoint fetcher, exact MPC raw-value transforms,
+immutable Parquet/Zstd point shards, and a synthetic execution smoke for both
+adaptation tracks.
+Candidate-frame raster construction, sparse COG-to-point materialization, a
+durable embedding cache, and the distributed training runner are the next
+milestone. Capturing the official parity fixture is currently a manual
+prerequisite. The repository does not pretend those unfinished pieces are
+production-ready.
 
 ## Setup
 
@@ -82,6 +86,25 @@ If public PyPI still reports a proxy error after these overrides, the VM itself
 does not currently have direct PyPI egress; changing pip configuration alone
 cannot bypass that network policy.
 
+Fetch the pinned 220 MiB TESSERA v1.1 MPC encoder. The command streams into a
+resumable `.part`, verifies its byte count and SHA-256, fsyncs it, and only then
+atomically installs it. A valid existing file is reused; an invalid destination
+is never silently replaced.
+
+```bash
+spectrajam fetch-checkpoint --config configs/smoke.yaml
+spectrajam validate-config --config configs/smoke.yaml --require-checkpoint
+```
+
+Then execute one optimizer update for each model track on deterministic
+normalized synthetic windows: 7 days for Teacher-Student and 14 days for LoRA.
+This proves checkpoint loading, forward/backward, masking, and adapter wiring;
+it is explicitly not a model-quality experiment.
+
+```bash
+spectrajam model-smoke --config configs/smoke.yaml --device cuda:0
+```
+
 Validate an experiment contract:
 
 ```bash
@@ -89,8 +112,8 @@ spectrajam validate-config --config configs/pilot.yaml
 ```
 
 That command validates the template structure and rejects provider/checkpoint
-mixing. After replacing boundary/checkpoint paths and hashes, use the operational
-gate, which reads and hashes the actual files:
+mixing. After installing the pinned checkpoint and replacing the boundary paths
+and hashes, use the operational gate, which reads and hashes the actual files:
 
 ```bash
 spectrajam validate-config --config configs/pilot.yaml --operational
@@ -115,6 +138,24 @@ year-split matrix. This makes
 four evaluations possible without redefining the data: ordinary train,
 spatial-only holdout, temporal-only holdout, and combined spatial-temporal
 holdout.
+
+Discover every STAC page once per spatial work block and year. Completed query
+snapshots are immutable and safely reused after interruption; repeated raw STAC
+items are stored once by content hash rather than copied into every query.
+
+```bash
+spectrajam catalog-discover \
+  --config configs/smoke.yaml \
+  --manifest data/manifests/smoke.csv \
+  --output data/catalog
+```
+
+The implemented observation-format contract stores only ragged point histories:
+S2 as exact `uint16[10]` plus SCL, and S1 as exact scaled-dB `int16[2]` plus
+orbit. Every row binds the source item and catalog-query hashes. The forthcoming
+sparse materializer will write this format without persisting country-scale
+image cubes, and its training loader will normalize to FP32 before optional
+BF16 autocast.
 
 Initialize the acquisition ledger:
 

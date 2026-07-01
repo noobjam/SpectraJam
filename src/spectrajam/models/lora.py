@@ -33,10 +33,23 @@ class LoRAConfig:
 
 
 class LinearLoRA(nn.Module):
-    def __init__(self, out_features: int, in_features: int, rank: int, alpha: float):
+    def __init__(
+        self,
+        out_features: int,
+        in_features: int,
+        rank: int,
+        alpha: float,
+        *,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
         super().__init__()
-        self.lora_A = nn.Parameter(torch.empty(rank, in_features))
-        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        self.lora_A = nn.Parameter(
+            torch.empty(rank, in_features, device=device, dtype=dtype)
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(out_features, rank, device=device, dtype=dtype)
+        )
         self.scale = alpha / rank
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
 
@@ -47,12 +60,20 @@ class LinearLoRA(nn.Module):
 class PackedQKVLoRA(nn.Module):
     """Apply LoRA to Q and V rows of PyTorch's packed in-projection weight."""
 
-    def __init__(self, embed_dim: int, rank: int, alpha: float):
+    def __init__(
+        self,
+        embed_dim: int,
+        rank: int,
+        alpha: float,
+        *,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
         super().__init__()
-        self.q_A = nn.Parameter(torch.empty(rank, embed_dim))
-        self.q_B = nn.Parameter(torch.zeros(embed_dim, rank))
-        self.v_A = nn.Parameter(torch.empty(rank, embed_dim))
-        self.v_B = nn.Parameter(torch.zeros(embed_dim, rank))
+        self.q_A = nn.Parameter(torch.empty(rank, embed_dim, device=device, dtype=dtype))
+        self.q_B = nn.Parameter(torch.zeros(embed_dim, rank, device=device, dtype=dtype))
+        self.v_A = nn.Parameter(torch.empty(rank, embed_dim, device=device, dtype=dtype))
+        self.v_B = nn.Parameter(torch.zeros(embed_dim, rank, device=device, dtype=dtype))
         self.scale = alpha / rank
         nn.init.kaiming_uniform_(self.q_A, a=math.sqrt(5))
         nn.init.kaiming_uniform_(self.v_A, a=math.sqrt(5))
@@ -71,7 +92,14 @@ def _register_linear(module: nn.Linear, config: LoRAConfig) -> None:
     parametrize.register_parametrization(
         module,
         "weight",
-        LinearLoRA(module.out_features, module.in_features, config.rank, config.alpha),
+        LinearLoRA(
+            module.out_features,
+            module.in_features,
+            config.rank,
+            config.alpha,
+            device=module.weight.device,
+            dtype=module.weight.dtype,
+        ),
     )
 
 
@@ -90,7 +118,13 @@ def inject_lora(model: nn.Module, config: LoRAConfig) -> list[str]:
                 parametrize.register_parametrization(
                     module,
                     "in_proj_weight",
-                    PackedQKVLoRA(module.embed_dim, config.rank, config.alpha),
+                    PackedQKVLoRA(
+                        module.embed_dim,
+                        config.rank,
+                        config.alpha,
+                        device=module.in_proj_weight.device,
+                        dtype=module.in_proj_weight.dtype,
+                    ),
                 )
                 installed.append(f"{name}.in_proj_weight[q,v]")
 

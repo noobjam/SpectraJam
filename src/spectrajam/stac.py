@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import uuid
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -35,9 +37,10 @@ class WorkTile:
 
     @property
     def key(self) -> str:
-        digest = hashlib.sha256(
-            f"{self.country}:{self.spatial_block}:{self.year}".encode()
-        ).hexdigest()[:16]
+        identity = json.dumps(
+            asdict(self), sort_keys=True, separators=(",", ":")
+        ).encode()
+        digest = hashlib.sha256(identity).hexdigest()[:16]
         return f"{self.country.lower()}-{self.year}-{digest}"
 
 
@@ -89,9 +92,17 @@ class STACCatalog:
     per-pixel preprocessing decision and is evaluated after materialization.
     """
 
-    def __init__(self, profile: ProviderProfile = MPC_V11, request_retries: int = 2):
+    def __init__(
+        self,
+        profile: ProviderProfile = MPC_V11,
+        request_retries: int = 2,
+        backoff_factor: float = 0.5,
+        backoff_max: float = 60.0,
+    ):
         self.profile = profile
         self.request_retries = request_retries
+        self.backoff_factor = backoff_factor
+        self.backoff_max = backoff_max
         self._client = None
 
     def _open(self):
@@ -107,7 +118,8 @@ class STACCatalog:
                 connect=self.request_retries,
                 read=self.request_retries,
                 status=self.request_retries,
-                backoff_factor=0.5,
+                backoff_factor=self.backoff_factor,
+                backoff_max=self.backoff_max,
                 status_forcelist=(408, 425, 429, 500, 502, 503, 504),
                 allowed_methods=frozenset({"GET", "POST"}),
                 respect_retry_after_header=True,
@@ -146,6 +158,17 @@ class STACCatalog:
             if missing:
                 rejected.append({"id": item.id, "missing_assets": sorted(missing)})
                 continue
+            if modality == "s1":
+                orbit = str(item.properties.get("sat:orbit_state", "")).lower()
+                if orbit not in {"ascending", "descending"}:
+                    rejected.append(
+                        {
+                            "id": item.id,
+                            "reason": "unsupported_orbit_state",
+                            "sat:orbit_state": orbit or None,
+                        }
+                    )
+                    continue
             snapshots.append(
                 {
                     "id": item.id,
@@ -171,7 +194,7 @@ class STACCatalog:
             )
         if not snapshots:
             raise ContractError(
-                f"all {len(items)} STAC items were missing required {modality} assets"
+                f"all {len(items)} STAC items were rejected for {modality}"
             )
         return {
             "schema_version": 1,
@@ -196,9 +219,265 @@ class STACCatalog:
 
 def write_catalog_snapshot(path: str | Path, payload: dict[str, object]) -> tuple[str, int]:
     destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    temporary = destination.with_suffix(destination.suffix + ".part")
-    temporary.write_bytes(encoded)
-    temporary.replace(destination)
+    _atomic_write(destination, encoded)
     return hashlib.sha256(encoded).hexdigest(), len(payload["items"])
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogSnapshotResult:
+    path: str
+    sha256: str
+    item_count: int
+    item_documents_written: int
+    reused: bool
+
+
+def _atomic_write(destination: Path, content: bytes) -> bool:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(
+        f"{destination.name}.part.{os.getpid()}.{uuid.uuid4().hex}"
+    )
+    try:
+        with temporary.open("wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, destination)
+            installed = True
+        except FileExistsError as error:
+            if destination.read_bytes() != content:
+                raise ContractError(
+                    f"refusing to replace immutable artifact: {destination}"
+                ) from error
+            installed = False
+        directory = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return installed
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _digest_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.sha256")
+
+
+def write_content_addressed_catalog_snapshot(
+    path: str | Path,
+    item_store: str | Path,
+    payload: dict[str, object],
+) -> CatalogSnapshotResult:
+    """Persist one immutable query while de-duplicating raw STAC item documents."""
+    destination = Path(path)
+    expected = json.loads(json.dumps(payload))
+    items = expected.get("items")
+    if not isinstance(items, list) or not items:
+        raise ContractError("catalog snapshot must contain at least one item")
+
+    store = Path(item_store)
+    written = 0
+    for item in items:
+        if not isinstance(item, dict):
+            raise ContractError("catalog item snapshot must be a mapping")
+        raw_item = item.pop("raw_item", None)
+        if not isinstance(raw_item, dict):
+            raise ContractError("catalog item is missing its raw STAC document")
+        encoded_item = _canonical_json(raw_item)
+        digest = hashlib.sha256(encoded_item).hexdigest()
+        item_path = store / f"{digest}.json"
+        if item_path.exists():
+            if hashlib.sha256(item_path.read_bytes()).hexdigest() != digest:
+                raise ContractError(f"content-addressed STAC item is corrupt: {item_path}")
+        else:
+            written += int(_atomic_write(item_path, encoded_item))
+        item["raw_item_sha256"] = digest
+
+    encoded_query = _canonical_json(expected)
+    digest = hashlib.sha256(encoded_query).hexdigest()
+    if destination.exists():
+        existing = destination.read_bytes()
+        if existing != encoded_query:
+            raise ContractError(
+                f"immutable catalog query already exists with different content: {destination}"
+            )
+        reused = True
+    else:
+        reused = not _atomic_write(destination, encoded_query)
+    _atomic_write(_digest_path(destination), f"{digest}\n".encode())
+    return CatalogSnapshotResult(
+        path=str(destination),
+        sha256=digest,
+        item_count=len(items),
+        item_documents_written=written,
+        reused=reused,
+    )
+
+
+def catalog_snapshot_path(root: str | Path, tile: WorkTile, modality: str) -> Path:
+    if modality not in {"s1", "s2"}:
+        raise ContractError(f"unsupported modality: {modality}")
+    return (
+        Path(root)
+        / "queries"
+        / tile.country.lower()
+        / str(tile.year)
+        / tile.key
+        / f"{modality}.json"
+    )
+
+
+def _validate_persisted_catalog(
+    path: Path,
+    item_store: Path,
+    tile: WorkTile,
+    modality: str,
+    profile: ProviderProfile,
+) -> tuple[bytes, dict[str, object]]:
+    encoded = path.read_bytes()
+    receipt_path = _digest_path(path)
+    if not receipt_path.is_file():
+        raise ContractError(f"catalog query checksum receipt is missing: {receipt_path}")
+    expected_digest = receipt_path.read_text().strip().lower()
+    actual_digest = hashlib.sha256(encoded).hexdigest()
+    if (
+        len(expected_digest) != 64
+        or any(value not in "0123456789abcdef" for value in expected_digest)
+        or actual_digest != expected_digest
+    ):
+        raise ContractError(f"catalog query checksum mismatch: {path}")
+    try:
+        payload = json.loads(encoded)
+    except json.JSONDecodeError as error:
+        raise ContractError(f"catalog query is not valid JSON: {path}") from error
+    if not isinstance(payload, dict):
+        raise ContractError(f"catalog query must be a mapping: {path}")
+    work_tile = payload.get("work_tile")
+    provider = payload.get("provider")
+    query = payload.get("query")
+    items = payload.get("items")
+    expected_tile = json.loads(json.dumps(asdict(tile)))
+    expected_provider = json.loads(json.dumps(asdict(profile)))
+    expected_bands = (
+        list(CANONICAL_S2_BANDS) if modality == "s2" else list(CANONICAL_S1_BANDS)
+    )
+    expected_query = {
+        "bbox": list(tile.bbox),
+        "datetime": f"{tile.year}-01-01/{tile.year}-12-31",
+        "collection": profile.collections[modality],
+        "item_cloud_filter": None,
+    }
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("modality") != modality
+        or work_tile != expected_tile
+        or provider != expected_provider
+        or payload.get("band_order") != expected_bands
+        or query != expected_query
+        or not isinstance(items, list)
+        or not items
+    ):
+        raise ContractError(f"catalog query identity or schema mismatch: {path}")
+    for item in items:
+        digest = item.get("raw_item_sha256") if isinstance(item, dict) else None
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(value not in "0123456789abcdef" for value in digest.lower())
+        ):
+            raise ContractError(f"catalog query has an invalid item digest: {path}")
+        item_path = item_store / f"{digest}.json"
+        if not item_path.is_file():
+            raise ContractError(f"catalog item is missing or corrupt: {item_path}")
+        raw_encoded = item_path.read_bytes()
+        if hashlib.sha256(raw_encoded).hexdigest() != digest:
+            raise ContractError(f"catalog item is missing or corrupt: {item_path}")
+        try:
+            raw_item = json.loads(raw_encoded)
+        except json.JSONDecodeError as error:
+            raise ContractError(f"catalog item is not valid JSON: {item_path}") from error
+        raw_assets = raw_item.get("assets") if isinstance(raw_item, dict) else None
+        raw_properties = raw_item.get("properties") if isinstance(raw_item, dict) else None
+        summary_assets = item.get("assets") if isinstance(item, dict) else None
+        summary_properties = item.get("properties") if isinstance(item, dict) else None
+        if (
+            not isinstance(raw_item, dict)
+            or raw_item.get("id") != item.get("id")
+            or raw_item.get("collection") != item.get("collection")
+            or raw_item.get("bbox") != item.get("bbox")
+            or not isinstance(raw_assets, dict)
+            or not isinstance(summary_assets, dict)
+            or not isinstance(raw_properties, dict)
+            or not isinstance(summary_properties, dict)
+        ):
+            raise ContractError(f"catalog item summary does not match raw item: {path}")
+        if any(
+            raw_properties.get(key) != value
+            for key, value in summary_properties.items()
+        ):
+            raise ContractError(f"catalog properties do not match raw item: {path}")
+        for asset_key, href in summary_assets.items():
+            raw_asset = raw_assets.get(asset_key)
+            if not isinstance(raw_asset, dict) or raw_asset.get("href") != href:
+                raise ContractError(
+                    f"catalog asset summary does not match raw item: {path}/{asset_key}"
+                )
+    return encoded, payload
+
+
+def discover_catalogs(
+    records: Iterable[PointYear],
+    output_root: str | Path,
+    catalog: STACCatalog,
+    modalities: Iterable[str] = ("s1", "s2"),
+) -> list[CatalogSnapshotResult]:
+    """Discover missing work-tile catalogs; completed immutable snapshots are reused."""
+    root = Path(output_root)
+    requested = tuple(sorted(set(modalities)))
+    if not requested or any(value not in {"s1", "s2"} for value in requested):
+        raise ContractError("modalities must contain s1 and/or s2")
+
+    results = []
+    for tile in build_work_tiles(records):
+        for modality in requested:
+            destination = catalog_snapshot_path(root, tile, modality)
+            if destination.exists():
+                if not _digest_path(destination).is_file():
+                    payload = catalog.search(tile, modality)
+                    results.append(
+                        write_content_addressed_catalog_snapshot(
+                            destination,
+                            root / "items",
+                            payload,
+                        )
+                    )
+                    continue
+                encoded, existing = _validate_persisted_catalog(
+                    destination, root / "items", tile, modality, catalog.profile
+                )
+                results.append(
+                    CatalogSnapshotResult(
+                        path=str(destination),
+                        sha256=hashlib.sha256(encoded).hexdigest(),
+                        item_count=len(existing.get("items", [])),
+                        item_documents_written=0,
+                        reused=True,
+                    )
+                )
+                continue
+            payload = catalog.search(tile, modality)
+            results.append(
+                write_content_addressed_catalog_snapshot(
+                    destination,
+                    root / "items",
+                    payload,
+                )
+            )
+    return results

@@ -287,6 +287,10 @@ class BaseModelConfig:
             raise ContractError(
                 f"upstream_commit must remain pinned to {TESSERA_UPSTREAM_COMMIT}"
             )
+        if len(self.checkpoint_sha256) != 64 or any(
+            value not in "0123456789abcdef" for value in self.checkpoint_sha256.lower()
+        ):
+            raise ContractError("checkpoint_sha256 must be a hexadecimal SHA-256 digest")
         require_band_order(self.s2_bands)
         if require_checkpoint:
             path = Path(self.checkpoint_path).expanduser()

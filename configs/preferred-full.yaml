@@ -56,7 +56,7 @@ base_model:
   data_source: mpc
   upstream_commit: d06ee44a053246db3e73f104403f6eaf642e1abf
   checkpoint_path: checkpoints/tessera_v1_1_mpc_encoder.pt
-  checkpoint_sha256: REPLACE_BEFORE_TRAINING
+  checkpoint_sha256: 5dab0f070d5711034f7c241e841eaeedb49fef90b9355f68c8f20b9507839ec3
   s2_bands: [B04, B02, B03, B08, B8A, B05, B06, B07, B11, B12]
 
 temporal_windows:

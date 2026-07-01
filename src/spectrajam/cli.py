@@ -4,9 +4,11 @@ import argparse
 import json
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
+from .artifacts import TESSERA_V11_MPC_ENCODER, fetch_verified_artifact
 from .config import load_config
-from .contracts import sha256_file
+from .contracts import ContractError, sha256_file
 from .ledger import AcquisitionLedger, IncompleteAcquisitionError
 from .parity import verify_parity_fixture
 from .sampling import (
@@ -19,7 +21,12 @@ from .sampling import (
     validate_manifest_universe,
     write_manifest,
 )
-from .stac import build_work_tiles
+from .stac import (
+    ProviderProfile,
+    STACCatalog,
+    build_work_tiles,
+    discover_catalogs,
+)
 
 
 def _validate_config(args: argparse.Namespace) -> int:
@@ -138,6 +145,47 @@ def _catalog_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _catalog_discover(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    records = validate_manifest_universe(
+        read_manifest(args.manifest),
+        config.countries,
+        {
+            "train": config.years.train,
+            "validation": config.years.validation,
+            "test": config.years.test,
+        },
+        config.sampling.points_per_country,
+    )
+    profile = ProviderProfile(
+        name=config.stac.profile,
+        endpoint=config.stac.endpoint,
+        collections=config.stac.collections,
+        checkpoint_source=config.base_model.data_source,
+    )
+    catalog = STACCatalog(
+        profile,
+        request_retries=max(0, config.retry.max_attempts - 1),
+        backoff_factor=config.retry.base_delay_seconds,
+        backoff_max=config.retry.max_delay_seconds,
+    )
+    results = discover_catalogs(records, args.output, catalog, args.modalities)
+    print(
+        json.dumps(
+            {
+                "queries": len(results),
+                "reused": sum(result.reused for result in results),
+                "items_referenced": sum(result.item_count for result in results),
+                "item_documents_written": sum(
+                    result.item_documents_written for result in results
+                ),
+                "output": args.output,
+            }
+        )
+    )
+    return 0
+
+
 def _verify_parity(args: argparse.Namespace) -> int:
     config = load_config(args.config, require_checkpoint=True)
     receipt = verify_parity_fixture(
@@ -148,6 +196,51 @@ def _verify_parity(args: argparse.Namespace) -> int:
         args.atol,
     )
     print(json.dumps(receipt, indent=2))
+    return 0
+
+
+def _fetch_checkpoint(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    artifact = TESSERA_V11_MPC_ENCODER
+    if config.base_model.data_source != "mpc" or config.base_model.version != "1.1":
+        raise ContractError("the pinned fetch command supports only TESSERA v1.1 MPC")
+    if config.base_model.checkpoint_sha256.lower() != artifact.sha256:
+        raise ContractError(
+            "config checkpoint_sha256 does not match the pinned TESSERA v1.1 MPC artifact"
+        )
+    destination = Path(config.base_model.checkpoint_path)
+    reused = destination.is_file()
+    fetched = fetch_verified_artifact(
+        artifact,
+        destination,
+        max_attempts=args.max_attempts,
+    )
+    print(
+        json.dumps(
+            {
+                "path": str(fetched),
+                "bytes": fetched.stat().st_size,
+                "sha256": artifact.sha256,
+                "source_revision": artifact.revision,
+                "reused": reused,
+            }
+        )
+    )
+    return 0
+
+
+def _model_smoke(args: argparse.Namespace) -> int:
+    from .model_smoke import run_model_smoke
+
+    config = load_config(args.config, require_checkpoint=True)
+    report = run_model_smoke(
+        config.base_model.checkpoint_path,
+        config.base_model.checkpoint_sha256,
+        device=args.device,
+        seed=args.seed,
+        batch_size=args.batch_size,
+    )
+    print(json.dumps(report, sort_keys=True))
     return 0
 
 
@@ -191,12 +284,31 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_plan.add_argument("--manifest", required=True)
     catalog_plan.set_defaults(handler=_catalog_plan)
 
+    catalog_discover = subparsers.add_parser("catalog-discover")
+    catalog_discover.add_argument("--config", required=True)
+    catalog_discover.add_argument("--manifest", required=True)
+    catalog_discover.add_argument("--output", required=True)
+    catalog_discover.add_argument("--modalities", nargs="+", default=["s1", "s2"])
+    catalog_discover.set_defaults(handler=_catalog_discover)
+
     parity = subparsers.add_parser("verify-upstream-parity")
     parity.add_argument("--config", required=True)
     parity.add_argument("--fixture", required=True)
     parity.add_argument("--receipt", required=True)
     parity.add_argument("--atol", type=float, default=1e-5)
     parity.set_defaults(handler=_verify_parity)
+
+    fetch_checkpoint = subparsers.add_parser("fetch-checkpoint")
+    fetch_checkpoint.add_argument("--config", required=True)
+    fetch_checkpoint.add_argument("--max-attempts", type=int, default=5)
+    fetch_checkpoint.set_defaults(handler=_fetch_checkpoint)
+
+    model_smoke = subparsers.add_parser("model-smoke")
+    model_smoke.add_argument("--config", required=True)
+    model_smoke.add_argument("--device", default="cuda:0")
+    model_smoke.add_argument("--seed", type=int, default=20260701)
+    model_smoke.add_argument("--batch-size", type=int, default=4)
+    model_smoke.set_defaults(handler=_model_smoke)
 
     return parser
 

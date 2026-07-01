@@ -54,5 +54,6 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/test_incremental.py" = ["E402"]
+"tests/test_model_smoke.py" = ["E402"]
 "tests/test_models_and_losses.py" = ["E402"]
 "tests/test_windows.py" = ["E402"]

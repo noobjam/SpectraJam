@@ -64,3 +64,12 @@ def test_unknown_config_keys_are_rejected_instead_of_ignored(tmp_path: Path) -> 
     path.write_text(yaml.safe_dump(data))
     with pytest.raises(ContractError, match="unexpected"):
         load_config(path)
+
+
+def test_checkpoint_digest_must_be_pinned(tmp_path: Path) -> None:
+    data = yaml.safe_load((ROOT / "configs" / "smoke.yaml").read_text())
+    data["base_model"]["checkpoint_sha256"] = "REPLACE_BEFORE_TRAINING"
+    path = tmp_path / "unpinned.yaml"
+    path.write_text(yaml.safe_dump(data))
+    with pytest.raises(ContractError, match="checkpoint_sha256"):
+        load_config(path)

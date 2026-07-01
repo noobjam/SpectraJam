@@ -49,6 +49,45 @@ def test_zero_lora_is_exactly_base_equivalent() -> None:
     assert torch.allclose(before, model(s2, s1).detach(), atol=1e-6, rtol=0)
 
 
+def test_lora_parameters_inherit_base_device_and_dtype() -> None:
+    model = TesseraV11(
+        latent_dim=4,
+        representation_dim=8,
+        output_dim=8,
+        num_heads=2,
+        num_layers=1,
+        dim_feedforward=16,
+    ).to(dtype=torch.float64)
+    inject_lora(model, LoRAConfig(rank=2, alpha=2, target="attention_ffn"))
+    adapter_parameters = [
+        parameter
+        for name, parameter in model.named_parameters()
+        if "parametrizations" in name and not name.endswith(".original")
+    ]
+    assert adapter_parameters
+    assert all(parameter.dtype == torch.float64 for parameter in adapter_parameters)
+    base_device = next(model.parameters()).device
+    assert all(parameter.device == base_device for parameter in adapter_parameters)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_lora_can_be_injected_into_a_cuda_resident_base() -> None:
+    model = TesseraV11(
+        latent_dim=4,
+        representation_dim=8,
+        output_dim=8,
+        num_heads=2,
+        num_layers=1,
+        dim_feedforward=16,
+    ).to("cuda")
+    inject_lora(model, LoRAConfig(rank=2, alpha=2))
+    output = model(
+        torch.randn(2, 4, 11, device="cuda"),
+        torch.randn(2, 4, 3, device="cuda"),
+    )
+    assert output.device.type == "cuda"
+
+
 def test_student_handles_missing_modality_and_has_expected_shape() -> None:
     model = RegionalStudent(model_dim=32, layers=1, heads=4, feedforward_dim=64)
     batch, steps = 3, 5

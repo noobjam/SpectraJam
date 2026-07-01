@@ -1,7 +1,25 @@
+import hashlib
+import json
+from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 
-from spectrajam.contracts import CANONICAL_S1_BANDS, CANONICAL_S2_BANDS, PointYear
-from spectrajam.stac import STACCatalog, WorkTile, build_work_tiles
+import pytest
+
+from spectrajam.contracts import (
+    CANONICAL_S1_BANDS,
+    CANONICAL_S2_BANDS,
+    ContractError,
+    PointYear,
+)
+from spectrajam.stac import (
+    MPC_V11,
+    STACCatalog,
+    WorkTile,
+    build_work_tiles,
+    discover_catalogs,
+    write_content_addressed_catalog_snapshot,
+)
 
 
 def _row(sample: str, lon: float, year: int) -> PointYear:
@@ -33,16 +51,25 @@ class _Asset:
 
 
 class _Item:
-    def __init__(self, assets):
+    def __init__(self, assets, orbit="ascending"):
         self.id = "item"
         self.datetime = datetime(2023, 1, 1, tzinfo=UTC)
         self.collection_id = "collection"
         self.bbox = [1, 2, 3, 4]
-        self.properties = {}
+        self.properties = {"sat:orbit_state": orbit} if orbit else {}
         self.assets = {key: _Asset(f"https://example/{key}") for key in assets}
 
     def to_dict(self):
-        return {"type": "Feature", "id": self.id, "assets": {key: {} for key in self.assets}}
+        return {
+            "type": "Feature",
+            "id": self.id,
+            "collection": self.collection_id,
+            "bbox": self.bbox,
+            "properties": self.properties,
+            "assets": {
+                key: {"href": asset.href} for key, asset in self.assets.items()
+            },
+        }
 
 
 class _Search:
@@ -56,8 +83,10 @@ class _Search:
 class _Client:
     def __init__(self, item):
         self.item = item
+        self.calls = 0
 
     def search(self, **_kwargs):
+        self.calls += 1
         return _Search(self.item)
 
 
@@ -72,3 +101,95 @@ def test_catalog_carries_explicit_checkpoint_band_order() -> None:
     payload = s1_catalog.search(tile, "s1")
     assert payload["band_order"] == list(CANONICAL_S1_BANDS)
     assert "raw_item" in payload["items"][0]
+
+
+def test_discovery_is_content_addressed_and_resumable(tmp_path) -> None:
+    records = [
+        _row("a", 34.0, 2023),
+        replace(_row("b", 34.2, 2023), spatial_block="block-b"),
+    ]
+    catalog = STACCatalog()
+    catalog._client = _Client(_Item([*CANONICAL_S2_BANDS, "SCL"]))
+
+    first = discover_catalogs(records, tmp_path, catalog, modalities=("s2",))
+    assert len(first) == 2
+    assert sum(result.item_documents_written for result in first) == 1
+    assert len(list((tmp_path / "items").glob("*.json"))) == 1
+    assert all(not result.reused for result in first)
+    assert all(Path(f"{result.path}.sha256").is_file() for result in first)
+
+    resumed = discover_catalogs(records, tmp_path, catalog, modalities=("s2",))
+    assert len(resumed) == 2
+    assert all(result.reused for result in resumed)
+    assert catalog._client.calls == 2
+
+    moved = [replace(records[0], longitude=35.0), records[1]]
+    refreshed = discover_catalogs(moved, tmp_path, catalog, modalities=("s2",))
+    assert sum(result.reused for result in refreshed) == 1
+    assert catalog._client.calls == 3
+
+    changed_profile = replace(
+        MPC_V11,
+        collections={"s1": "sentinel-1-rtc", "s2": "different-s2-collection"},
+    )
+    changed_catalog = STACCatalog(changed_profile)
+    changed_catalog._client = catalog._client
+    with pytest.raises(ContractError, match="identity or schema"):
+        discover_catalogs(records, tmp_path, changed_catalog, modalities=("s2",))
+
+    query_path = Path(first[0].path)
+    original_query = query_path.read_bytes()
+    query = json.loads(original_query)
+    query["items"][0]["assets"]["B04"] = "https://wrong.example/B04"
+    query_path.write_text(json.dumps(query, sort_keys=True, separators=(",", ":")))
+    with pytest.raises(ContractError, match="checksum mismatch"):
+        discover_catalogs(records, tmp_path, catalog, modalities=("s2",))
+
+    tampered = query_path.read_bytes()
+    Path(f"{query_path}.sha256").write_text(f"{hashlib.sha256(tampered).hexdigest()}\n")
+    with pytest.raises(ContractError, match="asset summary"):
+        discover_catalogs(records, tmp_path, catalog, modalities=("s2",))
+    query_path.write_bytes(original_query)
+    Path(f"{query_path}.sha256").write_text(
+        f"{hashlib.sha256(original_query).hexdigest()}\n"
+    )
+
+    next((tmp_path / "items").glob("*.json")).write_text("corrupt")
+    with pytest.raises(ContractError, match="missing or corrupt"):
+        discover_catalogs(records, tmp_path, catalog, modalities=("s2",))
+
+
+def test_immutable_query_refuses_different_content(tmp_path) -> None:
+    catalog = STACCatalog()
+    catalog._client = _Client(_Item([*CANONICAL_S2_BANDS, "SCL"]))
+    tile = WorkTile("RWA", "block", 2023, (29, -2, 30, -1), 10)
+    payload = catalog.search(tile, "s2")
+    destination = tmp_path / "query.json"
+    write_content_addressed_catalog_snapshot(destination, tmp_path / "items", payload)
+
+    payload["query"]["collection"] = "different"
+    with pytest.raises(ContractError, match="immutable"):
+        write_content_addressed_catalog_snapshot(destination, tmp_path / "items", payload)
+
+
+def test_s1_discovery_rejects_unknown_orbit_state() -> None:
+    tile = WorkTile("ISR", "block", 2023, (34, 31, 35, 32), 1)
+    catalog = STACCatalog()
+    catalog._client = _Client(
+        _Item([value.lower() for value in CANONICAL_S1_BANDS], orbit=None)
+    )
+    with pytest.raises(ContractError, match="rejected"):
+        catalog.search(tile, "s1")
+
+
+def test_missing_query_receipt_is_reconciled_by_requery(tmp_path) -> None:
+    records = [_row("a", 34.0, 2023)]
+    catalog = STACCatalog()
+    catalog._client = _Client(_Item([*CANONICAL_S2_BANDS, "SCL"]))
+    first = discover_catalogs(records, tmp_path, catalog, modalities=("s2",))[0]
+    Path(f"{first.path}.sha256").unlink()
+
+    resumed = discover_catalogs(records, tmp_path, catalog, modalities=("s2",))[0]
+    assert resumed.reused
+    assert Path(f"{first.path}.sha256").is_file()
+    assert catalog._client.calls == 2

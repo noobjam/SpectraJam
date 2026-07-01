@@ -211,7 +211,7 @@ def load_tessera_v11(
     path = Path(checkpoint_path).expanduser()
     require_sha256(path, expected_sha256)
     model = TesseraV11()
-    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     state = _extract_encoder_state(checkpoint)
     expected = set(model.state_dict())
     actual = set(state)

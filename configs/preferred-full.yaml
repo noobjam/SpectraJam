@@ -24,13 +24,13 @@ sampling:
 extent_policy:
   RWA:
     source: world_bank_official_boundaries_v2
-    boundary_path: data/boundaries/rwa.geojson
-    boundary_sha256: REPLACE_BEFORE_SAMPLING
+    boundary_path: data/frame/boundaries/world-bank-v2/admin0.gpkg
+    boundary_sha256: 97f0c8a0fa848b9a8414dbeb2e058fa37d59b13794ec232a87da000bdf4b117e
     ndlsa: exclude
   ISR:
     source: world_bank_official_boundaries_v2
-    boundary_path: data/boundaries/isr.geojson
-    boundary_sha256: REPLACE_BEFORE_SAMPLING
+    boundary_path: data/frame/boundaries/world-bank-v2/admin0.gpkg
+    boundary_sha256: 97f0c8a0fa848b9a8414dbeb2e058fa37d59b13794ec232a87da000bdf4b117e
     ndlsa: exclude
 
 strata:

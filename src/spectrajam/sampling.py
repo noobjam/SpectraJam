@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import math
+import os
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .contracts import ContractError, PointYear, stable_sample_id
+from .contracts import ContractError, PointYear, sha256_file, stable_sample_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,9 +30,15 @@ class SelectedPoint:
     inclusion_probability: float
 
 
+PROJECTED_LATTICE_DISTANCE_TOLERANCE = 0.005
+
+
 class _MinimumDistanceGuard:
-    def __init__(self, minimum_meters: float):
+    def __init__(self, minimum_meters: float, relative_tolerance: float = 0.0):
+        if not 0 <= relative_tolerance < 1:
+            raise ContractError("minimum-distance tolerance must be in [0, 1)")
         self.minimum_meters = minimum_meters
+        self.effective_minimum_meters = minimum_meters * (1 - relative_tolerance)
         self.cell_degrees = minimum_meters / 111_320.0
         self.cells: dict[tuple[str, int, int], list[tuple[float, float]]] = defaultdict(list)
 
@@ -55,7 +63,10 @@ class _MinimumDistanceGuard:
                 for other in self.cells.get(
                     (candidate.country, x + delta_x, y + delta_y), ()
                 ):
-                    if self._distance_meters(location, other) < self.minimum_meters:
+                    if (
+                        self._distance_meters(location, other)
+                        < self.effective_minimum_meters
+                    ):
                         raise ContractError(
                             f"candidate {candidate.candidate_id} violates the "
                             f"{self.minimum_meters:g} m minimum distance"
@@ -161,6 +172,7 @@ def select_candidates(
     split_ratios: Mapping[str, float],
     seed: int,
     min_distance_m: float = 200.0,
+    min_distance_relative_tolerance: float = 0.0,
 ) -> list[SelectedPoint]:
     """Deterministically select candidates while keeping spatial blocks intact."""
     selected: list[SelectedPoint] = []
@@ -241,7 +253,9 @@ def select_candidates(
             item.candidate.candidate_id,
         ),
     )
-    distance_guard = _MinimumDistanceGuard(min_distance_m)
+    distance_guard = _MinimumDistanceGuard(
+        min_distance_m, min_distance_relative_tolerance
+    )
     for point in result:
         distance_guard.add(point.candidate)
     return result
@@ -263,12 +277,15 @@ def stream_full_lattice(
     split_ratios: Mapping[str, float],
     seed: int,
     min_distance_m: float = 200.0,
+    min_distance_relative_tolerance: float = 0.0,
 ) -> Iterator[SelectedPoint]:
     """Stream a complete lattice without retaining millions of point objects."""
     seen_ids: set[str] = set()
     seen_locations: set[tuple[str, float, float]] = set()
     seen_countries: set[str] = set()
-    distance_guard = _MinimumDistanceGuard(min_distance_m)
+    distance_guard = _MinimumDistanceGuard(
+        min_distance_m, min_distance_relative_tolerance
+    )
     for candidate in candidates:
         if not candidate.candidate_id or candidate.candidate_id in seen_ids:
             raise ContractError(f"duplicate or empty candidate_id: {candidate.candidate_id!r}")
@@ -352,29 +369,55 @@ def read_candidates(path: str | Path) -> Iterator[Candidate]:
 def validate_candidate_extents(
     candidates: Iterable[Candidate], boundary_paths: Mapping[str, str]
 ) -> Iterator[Candidate]:
-    """Reject candidate points outside the checksum-verified country extents."""
+    """Reject candidate points outside the checksum-verified country extents.
+
+    World Bank ADM0 releases contain every country in one file.  Select the
+    configured ISO feature before preparing the geometry; unioning the full
+    release would turn this check into a nearly global extent check.
+    """
     try:
         import geopandas as gpd
+        from pyproj import Transformer
         from shapely.geometry import Point
         from shapely.prepared import prep
     except ImportError as error:
         raise RuntimeError("install spectrajam[data] to validate candidate boundaries") from error
 
+    from .candidate_frame import COUNTRY_GRID_CRS
+
     boundaries = {}
+    loaded_frames = {}
     for country, path in boundary_paths.items():
-        frame = gpd.read_file(path)
+        frame = loaded_frames.get(path)
+        if frame is None:
+            frame = gpd.read_file(path, engine="pyogrio")
+            loaded_frames[path] = frame
         if frame.empty or frame.crs is None:
             raise ContractError(f"boundary {path} is empty or has no CRS")
-        geometry = frame.to_crs("EPSG:4326").geometry.union_all()
+        if "ISO_A3" not in frame.columns:
+            raise ContractError(f"boundary {path} has no ISO_A3 field")
+        selected = frame.loc[frame["ISO_A3"] == country]
+        if len(selected) != 1:
+            raise ContractError(
+                f"boundary {path} contains {len(selected)} features for ISO_A3={country}; "
+                "expected exactly one"
+            )
+        metric_crs = COUNTRY_GRID_CRS[country]
+        geometry = selected.to_crs(metric_crs).geometry.iloc[0]
         if geometry.is_empty or not geometry.is_valid:
             raise ContractError(f"boundary {path} has invalid geometry")
-        boundaries[country] = prep(geometry)
+        boundaries[country] = (
+            prep(geometry),
+            Transformer.from_crs("EPSG:4326", metric_crs, always_xy=True),
+        )
 
     for candidate in candidates:
-        boundary = boundaries.get(candidate.country)
-        if boundary is None:
+        boundary_contract = boundaries.get(candidate.country)
+        if boundary_contract is None:
             raise ContractError(f"no verified boundary for {candidate.country}")
-        if not boundary.covers(Point(candidate.longitude, candidate.latitude)):
+        boundary, transformer = boundary_contract
+        x, y = transformer.transform(candidate.longitude, candidate.latitude)
+        if not boundary.covers(Point(x, y)):
             raise ContractError(
                 f"candidate {candidate.candidate_id} lies outside the pinned "
                 f"{candidate.country} extent"
@@ -406,7 +449,19 @@ def write_manifest(path: str | Path, records: Iterable[PointYear]) -> int:
         for record in records:
             writer.writerow({field: getattr(record, field) for field in fields})
             count += 1
-    temporary.replace(destination)
+        stream.flush()
+        os.fsync(stream.fileno())
+    if destination.exists():
+        if sha256_file(destination) != sha256_file(temporary):
+            raise ContractError(f"refusing to replace different manifest: {destination}")
+        temporary.unlink()
+    else:
+        os.replace(temporary, destination)
+        directory = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     return count
 
 
@@ -434,6 +489,35 @@ def read_manifest(path: str | Path) -> Iterator[PointYear]:
                     f"expected {expected}, got {record.sample_id}"
                 )
             yield record
+
+
+def verify_sampling_receipt(
+    manifest: str | Path,
+    config: str | Path,
+    receipt: str | Path,
+) -> dict[str, object]:
+    manifest_path = Path(manifest)
+    receipt_path = Path(receipt)
+    if not receipt_path.is_file():
+        raise ContractError(f"sampling receipt not found: {receipt_path}")
+    try:
+        payload = json.loads(receipt_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ContractError(f"invalid sampling receipt: {receipt_path}") from error
+    if payload.get("schema") != "spectrajam-sampling-v1":
+        raise ContractError("sampling receipt has an unexpected schema")
+    identity = payload.get("manifest")
+    if not isinstance(identity, dict):
+        raise ContractError("sampling receipt is missing manifest identity")
+    if not manifest_path.is_file():
+        raise ContractError(f"manifest not found: {manifest_path}")
+    if manifest_path.stat().st_size != identity.get("bytes"):
+        raise ContractError("manifest byte count does not match its sampling receipt")
+    if sha256_file(manifest_path) != identity.get("sha256"):
+        raise ContractError("manifest SHA-256 does not match its sampling receipt")
+    if sha256_file(config) != payload.get("config_sha256"):
+        raise ContractError("config SHA-256 does not match the sampling receipt")
+    return payload
 
 
 def validate_manifest_universe(

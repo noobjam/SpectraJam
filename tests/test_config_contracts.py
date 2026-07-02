@@ -40,10 +40,15 @@ def test_stac_and_checkpoint_source_cannot_be_mixed(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_operational_validation_rejects_boundary_placeholders() -> None:
+def test_operational_validation_rejects_missing_boundary(tmp_path: Path) -> None:
+    data = yaml.safe_load((ROOT / "configs" / "pilot.yaml").read_text())
+    for policy in data["extent_policy"].values():
+        policy["boundary_path"] = str(tmp_path / "missing.gpkg")
+    path = tmp_path / "missing-boundary.yaml"
+    path.write_text(yaml.safe_dump(data))
     with pytest.raises(ContractError, match="boundary not found"):
         load_config(
-            ROOT / "configs" / "pilot.yaml",
+            path,
             require_boundaries=True,
         )
 

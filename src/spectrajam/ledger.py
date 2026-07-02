@@ -113,6 +113,7 @@ class AcquisitionLedger:
         max_attempts: int,
         manifest_sha256: str,
         config_sha256: str,
+        sampling_receipt_sha256: str | None = None,
         chunk_size: int = 5000,
     ) -> int:
         if max_attempts < 1:
@@ -123,6 +124,8 @@ class AcquisitionLedger:
 
         if len(manifest_sha256) != 64 or len(config_sha256) != 64:
             raise ContractError("manifest and config SHA-256 digests are required")
+        if sampling_receipt_sha256 is not None and len(sampling_receipt_sha256) != 64:
+            raise ContractError("sampling receipt SHA-256 digest must contain 64 characters")
         if chunk_size < 1:
             raise ContractError("chunk_size must be positive")
 
@@ -132,6 +135,8 @@ class AcquisitionLedger:
             "modalities": json.dumps(modalities_tuple),
             "max_attempts": str(max_attempts),
         }
+        if sampling_receipt_sha256 is not None:
+            signature["sampling_receipt_sha256"] = sampling_receipt_sha256.lower()
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")

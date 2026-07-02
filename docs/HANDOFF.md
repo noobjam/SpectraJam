@@ -1,9 +1,9 @@
 # SpectraJam session handoff
 
-Last updated: 2026-07-01  
-Repository: <https://github.com/noobjam/SpectraJam>  
-Branch: `main`  
-Implementation baseline before this handoff: `36c30ef`
+Last updated: 2026-07-02
+Repository: <https://github.com/noobjam/SpectraJam>
+Branch: `main`
+Baseline at the start of the frame milestone: `b19f4b6`
 
 ## Current outcome
 
@@ -21,7 +21,10 @@ not the semantic definition of an embedding.
 
 No regional model has been scientifically trained yet. The real checkpoint and
 CUDA execution paths have been proven, but their inputs were deterministic
-synthetic observations. The next milestone is the real sparse-data path.
+synthetic observations. The authoritative candidate-frame source registry and
+200 m Rwanda+Israel land-frame builder are now implemented. The next milestone
+starts by reproducing that frame on the VM, selecting the 128/country smoke
+universe, and materializing real sparse Sentinel observations.
 
 ## Verified VM state
 
@@ -30,7 +33,7 @@ The following was verified on the training VM on 2026-07-01:
 - 8 × NVIDIA H100 80 GB HBM3;
 - all-to-all `NV18` GPU connectivity in one NUMA domain;
 - public-PyPI installation works after overriding the corporate pip index;
-- the full suite passes: `112 passed`;
+- the full suite passed before the frame milestone: `112 passed`;
 - the official encoder was downloaded, hashed, strictly loaded, and executed
   on `cuda:0`;
 - both adaptation tracks completed a real forward/backward/optimizer update.
@@ -114,6 +117,21 @@ yet been captured.
 
 ### Sampling, discovery, and durability primitives
 
+- ten pinned candidate-frame inputs with exact URLs, byte counts, SHA-256,
+  version, license, and producer metadata;
+- resumable verified download of World Bank catalog-v2 ADM0/NDLSA and data
+  dictionary, RESOLVE Ecoregions 2017, the WorldCover grid, and five local
+  WorldCover 2021 v200 COGs (506,016,614 bytes total);
+- deterministic per-country UTM lattice (`EPSG:32735` RWA, `EPSG:32636` ISR)
+  with globally anchored 200 m centers and aligned 20 km blocks;
+- exact World Bank ISO row selection with standalone ADM0/NDLSA policy checks;
+- explicit Latin-1 RESOLVE decoding, component-hash validation, geometry
+  repair accounting, and numeric `ECO_ID` labeling;
+- nearest-pixel WorldCover labeling, nodata/permanent-water exclusion, explicit
+  missing-ecoregion exclusions, and deterministic tie resolution;
+- atomic candidate CSV publication plus a source/runtime/count/SHA receipt;
+- candidate-receipt verification before selection and a sampling receipt that
+  binds candidate, config, and manifest SHA-256 values;
 - deterministic stratified sampling from a prepared candidate CSV;
 - stable sample IDs, inclusion probabilities, and split expansion;
 - SQLite task ledger with leases, retries, checksums, and completion gates;
@@ -144,11 +162,55 @@ truncates rather than rounds; tests use stable non-boundary values.
 |---|---:|---|---:|---|
 | Smoke | 128/country | 2023–2025 | 768 | First real-data proof |
 | Pilot | 25,000/country | 2019, 2021, 2023–2025 | 250,000 | Learning curves |
-| Preferred full | estimated 0.55–0.65M/country | 2019–2025 | estimated 7.7–9.1M | Full regional experiment |
+| Preferred full | 593,292 RWA + 506,429 ISR reference | 2019–2025 | 7,698,047 | Full regional experiment |
 
-The full count is only an estimate until the boundary and land masks are
-applied. Do not promote the pilot to full automatically. Learning curves should
-decide whether the full run earns its cost.
+The table's full-count range was the pre-frame planning estimate. The reference
+count below now replaces it for this exact source/runtime contract. Do not
+promote the pilot to full automatically; learning curves decide whether the
+full run earns its cost.
+
+### Reference frame reproduction
+
+The 2026-07-02 local reference run produced 1,099,721 land anchors:
+
+| Country | Candidates | Permanent-water exclusions | Missing-ecoregion exclusions |
+|---|---:|---:|---:|
+| Rwanda | 593,292 | 38,336 | 1,534 (0.258%) |
+| Israel | 506,429 | 12,716 | 1,440 (0.284%) |
+
+Israel touched three NDLSA boundaries with zero positive-area overlap; Rwanda
+touched none. The missing-ecoregion rates are source-edge gaps and remain below
+the fail-closed 1% ceiling. Generated data is ignored by Git, so the VM must
+reproduce these counts and record its own output/receipt hashes before sampling.
+
+Reference artifact identities:
+
+```text
+source bundle:          506016614 bytes
+candidate CSV:          142975195 bytes
+candidate CSV SHA-256:  2127dd4ea912acf834ecbe67f496f349bfe475ff210d73b771bfb579395db4f0
+candidate receipt SHA:  4ccd2c934a4ff2f06b904a7f8a99c1ca7ff93efeb79c53edb7451db676b999ad
+source receipt SHA:     5b792894cac1ea16d43a60f41231fb8cac5de6dc30ab93aa95e3e3dd0ede038b
+```
+
+The receipt's import-time source hashes matched the checked-out implementation,
+and a pre-review/reference rerun was byte-identical. The receipt records
+GeoPandas, Pyogrio/GDAL, Rasterio/GDAL, Shapely/GEOS, PyProj/PROJ, and NumPy
+versions. Frame-critical geospatial package versions are exact pins.
+
+The real smoke selection then passed its own receipt gate:
+
+- 128 anchors per country, 256 total;
+- 768 point-years;
+- manifest SHA-256
+  `9a739447daa17a0663c33822f9d687ac8ce3cedb8d12c3deec8fd9baa6bf13f9`;
+- sampling-receipt SHA-256
+  `c6cf37d42ac364cb8fe4570eebd9027ef3685d12f526a5df40ba6d0e27f7a7c8`;
+- 1,536 pending ledger tasks (768 point-years × S1/S2), zero failures, with
+  the ledger bound to that sampling receipt plus the manifest and config;
+- 333 country/block/year STAC work tiles;
+- current local test result: `140 passed, 1 CUDA-only skipped`;
+- `validate-config --operational` passes with the pinned frame and checkpoint.
 
 Primary stratification is RESOLVE ecoregion × ESA WorldCover 2021. Elevation,
 climate, and valid-observation quantiles are balancing variables. The current
@@ -158,39 +220,45 @@ sampler consumes these labels; it does not yet construct them.
 
 These gaps are intentional and must not be described as production-ready:
 
-1. Pinned downloads for the official boundary, WorldCover, ecoregion,
-   elevation, and climate inputs.
-2. The 200 m candidate-lattice and strata-construction command.
-3. A real `data/candidates.csv` or smoke manifest.
-4. Sparse COG-to-point raster reading and just-in-time MPC URL signing.
-5. STAC → transform → Parquet → ledger transaction integration.
-6. Explicit scientific terminal outcomes for no/insufficient observations.
-7. A Parquet-to-`ObservationBatch` loader and shard-aware batch sampler.
-8. The canonical official CPU/FP32 upstream parity fixture.
-9. A resumable epoch/checkpoint training runner with AMP and DDP.
-10. Real frozen-baseline, Student, or LoRA training/evaluation artifacts.
-11. A durable incremental embedding cache.
+1. Pinned elevation and climate inputs and their balancing quantiles. The
+   implemented frame currently persists only the declared primary stratum.
+2. A committed smoke manifest; generated frame/source artifacts remain ignored
+   data products and must be reproduced on the VM.
+3. Sparse Sentinel COG-to-point raster reading and just-in-time MPC URL signing.
+4. STAC → transform → Parquet → ledger transaction integration.
+5. Explicit scientific terminal outcomes for no/insufficient observations.
+6. A Parquet-to-`ObservationBatch` loader and shard-aware batch sampler.
+7. The canonical official CPU/FP32 upstream parity fixture.
+8. A resumable epoch/checkpoint training runner with AMP and DDP.
+9. Real frozen-baseline, Student, or LoRA training/evaluation artifacts.
+10. A durable incremental embedding cache.
 
-`spectrajam validate-config --operational` currently fails by design because
-the boundary files and their checksums are placeholders.
+`spectrajam validate-config --operational` now succeeds after
+`fetch-frame-sources` has installed the pinned ADM0 file (and after the pinned
+checkpoint exists when the command also requests it).
 
 ## Next milestone: real smoke-data vertical slice
 
 Implement this sequence; do not restart with GPU validation.
 
-### 1. Build the candidate frame
+### 1. Reproduce the candidate frame on the VM
 
-- Pin exact download URLs, versions, licenses, and SHA-256 values for World Bank
-  Official Boundaries v2 and the strata inputs.
-- Keep the declared Israel NDLSA exclusion policy. Any alternate operational
-  extent must be a separately named experiment.
-- Generate a deterministic 200 m land lattice inside each pinned boundary.
-- Attach RESOLVE ecoregion and WorldCover 2021 class.
-- Attach or stage elevation/climate/observation-count balancing variables.
-- Write a provenance receipt and `data/candidates.csv`.
+```bash
+spectrajam fetch-frame-sources --source-root data/frame
 
-Do not silently substitute Natural Earth boundaries or an unversioned web
-download.
+spectrajam candidate-frame \
+  --config configs/smoke.yaml \
+  --source-root data/frame \
+  --output data/candidates.csv \
+  --receipt data/candidates.receipt.json
+
+spectrajam validate-config --config configs/smoke.yaml --operational
+```
+
+The source fetch is about 506 MB and is resumable. Valid completed files are
+hashed and reused. An existing wrong artifact or a different receipt is never
+silently replaced. Preserve the declared Israel policy; do not substitute
+Natural Earth, a live ArcGIS response, or a different operational extent.
 
 ### 2. Create the smoke universe
 
@@ -198,11 +266,13 @@ download.
 spectrajam sample \
   --config configs/smoke.yaml \
   --candidates data/candidates.csv \
+  --candidate-receipt data/candidates.receipt.json \
   --output data/manifests/smoke.csv
 
 spectrajam ledger-init \
   --config configs/smoke.yaml \
   --manifest data/manifests/smoke.csv \
+  --sampling-receipt data/manifests/smoke.csv.receipt.json \
   --database data/state/smoke-acquisition.sqlite
 
 spectrajam catalog-discover \
@@ -211,8 +281,8 @@ spectrajam catalog-discover \
   --output data/catalog
 ```
 
-The first command is blocked until step 1 exists. The latter commands are
-implemented but have not yet been run against a real manifest.
+These commands are implemented but still need to be run against the reproduced
+VM frame. Confirm exactly 128 selected anchors per country before acquisition.
 
 ### 3. Implement sparse asset-major materialization
 
@@ -296,6 +366,19 @@ pytest -q
 # These are already verified; rerunning is optional and idempotent.
 spectrajam fetch-checkpoint --config configs/smoke.yaml
 spectrajam model-smoke --config configs/smoke.yaml --device cuda:0
+
+# This is the new milestone to run on the VM.
+spectrajam fetch-frame-sources --source-root data/frame
+spectrajam candidate-frame \
+  --config configs/smoke.yaml \
+  --source-root data/frame \
+  --output data/candidates.csv \
+  --receipt data/candidates.receipt.json
+spectrajam sample \
+  --config configs/smoke.yaml \
+  --candidates data/candidates.csv \
+  --candidate-receipt data/candidates.receipt.json \
+  --output data/manifests/smoke.csv
 ```
 
 Expected checkpoint output has `reused: true`. Do not repeat topology or generic
@@ -305,6 +388,8 @@ GPU diagnostics unless CUDA behavior actually regresses.
 
 - `configs/smoke.yaml`: first real-data contract.
 - `src/spectrajam/cli.py`: existing operational commands.
+- `src/spectrajam/frame_sources.py`: pinned source registry and verified fetch.
+- `src/spectrajam/candidate_frame.py`: lattice, land mask, strata, and receipt.
 - `src/spectrajam/sampling.py`: candidate selection and manifest expansion.
 - `src/spectrajam/stac.py`: query planning and immutable discovery snapshots.
 - `src/spectrajam/preprocessing.py`: parity-critical raw transforms.
@@ -320,10 +405,14 @@ GPU diagnostics unless CUDA behavior actually regresses.
 
 ## Known residual risks
 
-- Two concurrent `fetch-checkpoint` processes share one `.part`; invoke that
-  command once at a time until a file lock is added.
+- Frame-source fetch and candidate construction use non-blocking POSIX advisory
+  locks. Keep the source root on the VM's local filesystem; lock behavior on a
+  differently configured network filesystem has not been validated. The older
+  checkpoint fetcher still lacks its own process lock.
 - Checkpoint and boundary paths are currently interpreted relative to the
   repository working directory.
+- A non-default `--source-root` also requires matching `extent_policy` paths in
+  the config; the committed contracts intentionally point to `data/frame`.
 - The successful VM Torch/CUDA package version is not yet pinned in a lockfile.
 - Current catalog discovery is work-block/year scoped; monthly atomic
   materialization units still need to be introduced.
@@ -337,10 +426,11 @@ GPU diagnostics unless CUDA behavior actually regresses.
 ```text
 Continue SpectraJam from docs/HANDOFF.md on public main. Do not redo hardware,
 checkpoint, or synthetic model-smoke validation unless a regression appears.
-Implement the next real-data milestone in order: pinned boundary/strata inputs
-and deterministic candidate frame, then the asset-major MPC COG-to-point
-materializer with immutable Parquet publication and ledger commits. Preserve
-the exact TESSERA v1.1 MPC band order/transforms and arbitrary-window contract.
-Run tests, review integrity/crash-resume behavior, update the handoff, and push
-working commits to noobjam/SpectraJam.
+Reproduce the now-implemented pinned candidate frame on the VM, select and
+validate the 128/country smoke manifest, initialize/discover its catalog, then
+implement the asset-major MPC COG-to-point materializer with immutable Parquet
+publication and ledger commits. Preserve the exact TESSERA v1.1 MPC band
+order/transforms and arbitrary-window contract. Run tests, review
+integrity/crash-resume behavior, update the handoff, and push working commits
+to noobjam/SpectraJam.
 ```

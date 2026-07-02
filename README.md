@@ -59,12 +59,14 @@ packed-Q/V LoRA, arbitrary-window training, a mask-aware TESSERA runtime, and
 an exact cache/recompute incremental builder. It also implements the primitives
 for a checksum-pinned checkpoint fetcher, exact MPC raw-value transforms,
 immutable Parquet/Zstd point shards, and a synthetic execution smoke for both
-adaptation tracks.
-Candidate-frame raster construction, sparse COG-to-point materialization, a
-durable embedding cache, and the distributed training runner are the next
-milestone. Capturing the official parity fixture is currently a manual
-prerequisite. The repository does not pretend those unfinished pieces are
-production-ready.
+adaptation tracks. The real-data frame path now pins, retries, and verifies the
+World Bank v2 ADM0/NDLSA release, RESOLVE Ecoregions 2017, the ESA WorldCover
+2021 grid, and only the five country-covering WorldCover COGs. It streams a
+fixed-origin 200 m lattice in each pinned country UTM CRS into the sampler
+contract and writes a full provenance receipt. Sparse Sentinel COG-to-point
+materialization, a durable embedding cache, and the distributed training runner
+remain the next
+milestone. Capturing the official parity fixture is still a manual prerequisite.
 
 For the exact verified VM state, remaining gaps, and continuation order, see
 [Session handoff](docs/HANDOFF.md).
@@ -115,16 +117,32 @@ spectrajam validate-config --config configs/pilot.yaml
 ```
 
 That command validates the template structure and rejects provider/checkpoint
-mixing. After installing the pinned checkpoint and replacing the boundary paths
-and hashes, use the operational gate, which reads and hashes the actual files:
+mixing. Fetch the pinned frame inputs before using the operational gate. The
+download is resumable, fail-closed on byte count and SHA-256, and stores about
+506 MB of source data rather than a global land-cover raster:
 
 ```bash
+spectrajam fetch-frame-sources --source-root data/frame
 spectrajam validate-config --config configs/pilot.yaml --operational
 ```
 
-Sampling is always operational: it refuses placeholder boundary files or wrong
-checksums and checks every candidate against the pinned country geometry. The
-pilot begins from a candidate CSV whose required columns are
+Build the deterministic Rwanda+Israel candidate frame. This reads local COGs
+asset-major in bounded chunks, excludes WorldCover nodata and permanent water,
+and attaches the numeric RESOLVE `ECO_ID × WorldCover` primary stratum:
+
+```bash
+spectrajam candidate-frame \
+  --config configs/smoke.yaml \
+  --source-root data/frame \
+  --output data/candidates.csv \
+  --receipt data/candidates.receipt.json
+```
+
+The command also verifies the current World Bank ADM0 package itself. That
+package excludes NDLSA by construction; exact `ISO_A3` selection additionally
+keeps the separate West Bank and Gaza territory outside the Israel frame.
+Sampling remains operational: it refuses missing or wrong-checksum boundaries
+and checks every candidate against its exact country feature. Its required columns are
 `candidate_id,country,longitude,latitude,spatial_block,stratum`. Candidate IDs
 must be stable, spatial blocks must be assigned before sampling, and `stratum`
 is the pinned `ecoregion × WorldCover` key.
@@ -133,11 +151,13 @@ is the pinned `ecoregion × WorldCover` key.
 spectrajam sample \
   --config configs/pilot.yaml \
   --candidates data/candidates.csv \
+  --candidate-receipt data/candidates.receipt.json \
   --output data/manifests/pilot.csv
 ```
 
-The output contains inclusion probability plus the complete spatial-split ×
-year-split matrix. This makes
+The command verifies the candidate byte count and SHA-256 against its frame
+receipt, then writes a sampling receipt beside the manifest. The output contains
+inclusion probability plus the complete spatial-split × year-split matrix. This makes
 four evaluations possible without redefining the data: ordinary train,
 spatial-only holdout, temporal-only holdout, and combined spatial-temporal
 holdout.
@@ -166,6 +186,7 @@ Initialize the acquisition ledger:
 spectrajam ledger-init \
   --config configs/pilot.yaml \
   --manifest data/manifests/pilot.csv \
+  --sampling-receipt data/manifests/pilot.csv.receipt.json \
   --database data/state/acquisition.sqlite
 
 spectrajam ledger-status --database data/state/acquisition.sqlite
@@ -174,7 +195,7 @@ spectrajam ledger-assert-complete --database data/state/acquisition.sqlite
 
 Ledger initialization revalidates both countries, every configured year per
 candidate, stable IDs, and the expected pilot point count before binding the
-database to manifest and config hashes.
+database to sampling-receipt, manifest, and config hashes.
 
 Training must not start unless `ledger-assert-complete` passes. A point is never
 silently replaced after a failed download. The trainer constructors also require
@@ -202,8 +223,8 @@ spectrajam verify-upstream-parity \
 |---|---:|---|---:|---|
 | Smoke | 128/country | 2023–2025 | 768 | Contract and code checks |
 | Pilot | 25,000/country | 2019, 2021, 2023–2025 | 250,000 | End-to-end proof and early curves |
-| Preferred full | complete 200 m lattice, about 0.55–0.65M/country | 2019–2025 | about 7.7–9.1M | Closest regional analogue to TESSERA |
+| Preferred full | 593,292 RWA + 506,429 ISR reference anchors | 2019–2025 | 7,698,047 | Closest regional analogue to TESSERA |
 
-The full count is finalized only after applying the pinned land boundary and
-mask. Learning curves at 5k, 25k, 75k, 150k, and full anchors per country decide
-whether the full lattice earns its cost.
+These full counts come from the pinned 2026-07-02 reference frame and must be
+reproduced from its receipt on the VM. Learning curves at 5k, 25k, 75k, 150k,
+and full anchors per country decide whether the full lattice earns its cost.

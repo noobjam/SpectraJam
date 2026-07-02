@@ -1,7 +1,8 @@
 # Research record
 
-Generated 2026-07-01 from primary papers, official repositories, official data
-documentation, and the local TesseraCrop audit. Confidence is high for TESSERA
+Generated 2026-07-01 and updated 2026-07-02 from primary papers, official
+repositories, official data documentation, and the local TesseraCrop audit.
+Confidence is high for TESSERA
 v1.0 and ingestion contracts, medium for undocumented v1.1 training behavior,
 and moderate for the final regional sample count.
 
@@ -99,12 +100,37 @@ evaluation.
 - [Microsoft Planetary Computer STAC](https://planetarycomputer.microsoft.com/docs/quickstarts/reading-stac/)
 - [Copernicus Data Space STAC](https://documentation.dataspace.copernicus.eu/APIs/STAC.html)
 - [OGC STAC Item Search](https://docs.ogc.org/cs/25-005/25-005.html)
-- [ESA WorldCover 2021](https://worldcover2021.esa.int/)
-- [RESOLVE Ecoregions 2017](https://developers.google.com/earth-engine/datasets/catalog/RESOLVE_ECOREGIONS_2017)
+- [ESA WorldCover 2021 v200 data access](https://esa-worldcover.org/en/data-access)
+- [ESA WorldCover 2021 v200 DOI](https://doi.org/10.5281/zenodo.7254221)
+- [RESOLVE Ecoregions 2017 official download](https://ecoregions.appspot.com/)
 - [Copernicus DEM](https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/DEM.html)
 - [WorldClim 2](https://www.fao.org/land-water/land/land-governance/land-resources-planning-toolbox/category/details/en/c/1043064/)
 - [World Bank Official Boundaries v2](https://datacatalog.worldbank.org/infrastructure-data/search/dataset/0038272/world-bank-official-boundaries)
 - [UN SALB boundary disclaimer](https://salb.un.org/en)
+
+The candidate-frame registry is fail-closed on independently observed byte
+counts and SHA-256 values because the producers do not publish SHA-256
+manifests. It pins the World Bank catalog-v2 ADM0 GeoPackage and separate NDLSA
+GeoPackage from the 2026-06-12 blob snapshot, the v2 data dictionary, the
+producer-hosted RESOLVE zip, the official WorldCover grid, and five official
+WorldCover v200 map COGs. The source receipt records that these are project
+observations rather than producer-signed checksums.
+
+World Bank's standalone ADM0 layer contains 264 features and excludes NDLSA by
+the product data dictionary. The separate NDLSA layer contains 24 features;
+the builder validates it while retaining the declared exclusion policy. Israel
+is selected only by `ISO_A3=ISR`; West Bank and Gaza is a separate `ISO_A3=PSE`
+territory feature. The live World Bank ArcGIS layer is deliberately not used as
+the source pin because its global feature count differed from the downloadable
+catalog artifact during verification.
+
+RESOLVE's archive contains 847 rows: IDs 1–846 plus ID 0 for Rock and Ice. It
+has no `.cpg` sidecar (the DBF header uses codepage byte `0x57`), so names are
+decoded explicitly as ISO-8859-1 for this pinned artifact.
+Invalid source polygons are repaired using the recorded Shapely/GEOS runtime,
+and the receipt records the number repaired. WorldCover sampling uses numeric
+2021 v200 classes with nearest-neighbor point lookup; nodata 0 and permanent
+water 80 are excluded from the land frame.
 
 ## Local audit result
 

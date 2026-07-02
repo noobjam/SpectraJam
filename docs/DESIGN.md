@@ -19,8 +19,13 @@ from extra self-supervision can be mistaken for regional specialization.
 ## 2. Sampling frame
 
 The preferred frame follows TESSERA's own spatial thinning: one anchor on a
-200 m lattice. Rwanda and Israel together should yield roughly 1.1–1.3 million
-land anchors after the boundary and land masks are applied.
+200 m lattice. The implemented builder pins EPSG:32735 for Rwanda and
+EPSG:32636 for Israel, anchors cell centers to each CRS origin, and derives
+20 km block IDs from the same integer grid. The final anchor count is taken
+from the generated receipt rather than an area estimate. The downstream
+geodesic duplicate guard allows 0.5% projection-scale tolerance: an exact
+200 m UTM neighbor can measure about 199.6 m on the ellipsoid near the Rwanda
+extent, and silently enlarging the declared lattice would be less reproducible.
 
 The candidate-frame and future batch-balancing hierarchy is:
 
@@ -30,6 +35,14 @@ The candidate-frame and future batch-balancing hierarchy is:
    precipitation seasonality, and valid-observation count quantiles.
 4. Whole 20 km spatial blocks assigned to train, validation, or test.
 
+The frame builder attaches the primary stratum from numeric RESOLVE `ECO_ID`
+and ESA WorldCover 2021 v200 class, excludes class 0 and permanent-water class
+80, and preserves extra diagnostic columns. RESOLVE's source geometries are
+validated and repaired before indexing, with repair and boundary-tie counts in
+the receipt. Land centers in source-edge gaps with no RESOLVE polygon are
+explicitly counted and excluded rather than assigned an invented nearest class.
+The sampler verifies the candidate CSV against that receipt and emits a second
+receipt binding candidate, config, and manifest hashes before acquisition.
 Do not materialize the Cartesian product of all covariates. The current sampler
 allocates proportional to the square root of the single persisted primary
 `stratum`, with a floor of 200 where candidates exist. It makes a deterministic
@@ -70,11 +83,14 @@ from 2023 into the 2024 validation split. See [Windows](WINDOWS.md).
 ## 4. Boundary policy
 
 Boundary choice is part of the experiment, not an invisible library default.
-Use World Bank Official Boundaries v2 with a recorded publication date,
-download URL, SHA-256, CRS, license, and policy. Rwanda is cross-checked against
-the MININFRA Geoportal. For Israel, exclude Non-Determined Legal Status Areas in
-the default run and name any alternate operational extent as a separate run.
-This is a reproducibility policy, not a legal-status judgment.
+The pinned World Bank Official Boundaries catalog-v2 GeoPackage is the
+2026-06-12 blob snapshot. Its standalone ADM0 layer excludes NDLSA by product
+definition; the separate 24-feature NDLSA package is also pinned and validated.
+The builder selects exactly one `ISO_A3` member-state row per country and fails
+if that geometry has positive-area NDLSA overlap. Exact Israel selection also
+excludes the separately encoded West Bank and Gaza territory. Any alternate
+operational extent is a separately named run. This is a reproducibility policy,
+not a legal-status judgment.
 
 ## 5. STAC acquisition and completeness
 

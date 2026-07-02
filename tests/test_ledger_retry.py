@@ -126,6 +126,25 @@ def test_ledger_rejects_a_different_manifest_binding(tmp_path: Path) -> None:
         )
 
 
+def test_ledger_binds_sampling_receipt(tmp_path: Path) -> None:
+    ledger = AcquisitionLedger(tmp_path / "state.sqlite")
+    kwargs = {
+        "manifest_sha256": "1" * 64,
+        "config_sha256": "2" * 64,
+        "sampling_receipt_sha256": "3" * 64,
+    }
+    assert ledger.bootstrap([_record()], ["s2"], max_attempts=2, **kwargs) == 1
+    with pytest.raises(ContractError, match="sampling_receipt_sha256"):
+        ledger.bootstrap(
+            [_record()],
+            ["s2"],
+            max_attempts=2,
+            manifest_sha256="1" * 64,
+            config_sha256="2" * 64,
+            sampling_receipt_sha256="4" * 64,
+        )
+
+
 def test_deleted_task_breaks_bound_completion_invariant(tmp_path: Path) -> None:
     path = tmp_path / "state.sqlite"
     ledger = AcquisitionLedger(path)

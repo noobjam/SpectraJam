@@ -9,9 +9,15 @@ from pathlib import Path
 from .artifacts import TESSERA_V11_MPC_ENCODER, fetch_verified_artifact
 from .config import load_config
 from .contracts import ContractError, sha256_file
+from .frame_sources import (
+    FRAME_SOURCES,
+    fetch_frame_sources,
+    frame_operation_lock,
+    write_frame_sources_receipt,
+)
 from .ledger import AcquisitionLedger, IncompleteAcquisitionError
-from .parity import verify_parity_fixture
 from .sampling import (
+    PROJECTED_LATTICE_DISTANCE_TOLERANCE,
     expand_years,
     read_candidates,
     read_manifest,
@@ -19,6 +25,7 @@ from .sampling import (
     stream_full_lattice,
     validate_candidate_extents,
     validate_manifest_universe,
+    verify_sampling_receipt,
     write_manifest,
 )
 from .stac import (
@@ -48,8 +55,35 @@ def _validate_config(args: argparse.Namespace) -> int:
     return 0
 
 
-def _sample(args: argparse.Namespace) -> int:
+def _sample_unlocked(args: argparse.Namespace) -> int:
+    from . import candidate_frame as candidate_frame_module
+    from . import frame_sources as frame_sources_module
+    from .candidate_frame import (
+        candidate_frame_contract,
+        verify_candidate_frame_receipt,
+        write_json_atomic,
+    )
+
     config = load_config(args.config, require_boundaries=True)
+    candidate_receipt = verify_candidate_frame_receipt(
+        args.candidates, args.candidate_receipt
+    )
+    if candidate_receipt.get("frame_contract") != candidate_frame_contract(config):
+        raise ContractError(
+            "candidate-frame receipt does not match the experiment frame contract"
+        )
+    expected_implementation = {
+        "candidate_frame_sha256": sha256_file(candidate_frame_module.__file__),
+        "frame_sources_sha256": sha256_file(frame_sources_module.__file__),
+    }
+    recorded_implementation = candidate_receipt.get("implementation", {})
+    if any(
+        recorded_implementation.get(key) != value
+        for key, value in expected_implementation.items()
+    ):
+        raise ContractError(
+            "candidate-frame receipt was produced by a different implementation"
+        )
     candidates = validate_candidate_extents(
         read_candidates(args.candidates),
         {country: policy.boundary_path for country, policy in config.extents.items()},
@@ -60,6 +94,7 @@ def _sample(args: argparse.Namespace) -> int:
             config.sampling.split_ratios,
             config.sampling.seed,
             config.sampling.min_distance_m,
+            PROJECTED_LATTICE_DISTANCE_TOLERANCE,
         )
     else:
         points = select_candidates(
@@ -70,6 +105,7 @@ def _sample(args: argparse.Namespace) -> int:
             split_ratios=config.sampling.split_ratios,
             seed=config.sampling.seed,
             min_distance_m=config.sampling.min_distance_m,
+            min_distance_relative_tolerance=PROJECTED_LATTICE_DISTANCE_TOLERANCE,
         )
     records = expand_years(
         points,
@@ -80,6 +116,26 @@ def _sample(args: argparse.Namespace) -> int:
         },
     )
     record_count = write_manifest(args.output, records)
+    sampling_receipt = (
+        Path(args.receipt)
+        if args.receipt
+        else Path(args.output).with_suffix(Path(args.output).suffix + ".receipt.json")
+    )
+    write_json_atomic(
+        sampling_receipt,
+        {
+            "schema": "spectrajam-sampling-v1",
+            "config_sha256": sha256_file(args.config),
+            "candidate_frame_receipt_sha256": sha256_file(args.candidate_receipt),
+            "candidate_csv_sha256": candidate_receipt["candidate_output"]["sha256"],
+            "manifest": {
+                "path": args.output,
+                "bytes": Path(args.output).stat().st_size,
+                "sha256": sha256_file(args.output),
+                "point_years": record_count,
+            },
+        },
+    )
     print(
         json.dumps(
             {
@@ -91,14 +147,21 @@ def _sample(args: argparse.Namespace) -> int:
                 ),
                 "point_years": record_count,
                 "output": args.output,
+                "receipt": str(sampling_receipt),
             }
         )
     )
     return 0
 
 
+def _sample(args: argparse.Namespace) -> int:
+    with frame_operation_lock(Path(args.output).parent, "sampling"):
+        return _sample_unlocked(args)
+
+
 def _ledger_init(args: argparse.Namespace) -> int:
     config = load_config(args.config)
+    verify_sampling_receipt(args.manifest, args.config, args.sampling_receipt)
     records = validate_manifest_universe(
         read_manifest(args.manifest),
         config.countries,
@@ -116,6 +179,7 @@ def _ledger_init(args: argparse.Namespace) -> int:
         config.retry.max_attempts,
         manifest_sha256=sha256_file(args.manifest),
         config_sha256=sha256_file(args.config),
+        sampling_receipt_sha256=sha256_file(args.sampling_receipt),
     )
     print(json.dumps({"inserted": inserted, "summary": ledger.summary()}))
     return 0
@@ -187,6 +251,8 @@ def _catalog_discover(args: argparse.Namespace) -> int:
 
 
 def _verify_parity(args: argparse.Namespace) -> int:
+    from .parity import verify_parity_fixture
+
     config = load_config(args.config, require_checkpoint=True)
     receipt = verify_parity_fixture(
         config.base_model.checkpoint_path,
@@ -244,6 +310,67 @@ def _model_smoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fetch_frame_sources(args: argparse.Namespace) -> int:
+    fetched = fetch_frame_sources(
+        args.source_root,
+        max_attempts=args.max_attempts,
+    )
+    receipt = Path(args.receipt) if args.receipt else Path(args.source_root) / "sources.lock.json"
+    write_frame_sources_receipt(receipt, fetched)
+    print(
+        json.dumps(
+            {
+                "sources": len(fetched),
+                "bytes": sum(item.path.stat().st_size for item in fetched),
+                "reused": sum(item.reused for item in fetched),
+                "source_root": args.source_root,
+                "receipt": str(receipt),
+            }
+        )
+    )
+    return 0
+
+
+def _candidate_frame(args: argparse.Namespace) -> int:
+    from .candidate_frame import build_candidate_frame
+
+    fetched = fetch_frame_sources(
+        args.source_root,
+        max_attempts=args.max_attempts,
+    )
+    source_receipt = Path(args.source_root) / "sources.lock.json"
+    write_frame_sources_receipt(source_receipt, fetched)
+    config = load_config(args.config, require_boundaries=True)
+    expected_boundary = FRAME_SOURCES["world_bank_admin0"].destination(args.source_root)
+    configured_boundaries = {
+        Path(policy.boundary_path) for policy in config.extents.values()
+    }
+    if configured_boundaries != {expected_boundary}:
+        raise ContractError(
+            f"extent_policy must point to the fetched ADM0 artifact {expected_boundary}"
+        )
+    result = build_candidate_frame(
+        config,
+        args.source_root,
+        args.output,
+        args.receipt,
+        chunk_size=args.chunk_size,
+    )
+    print(
+        json.dumps(
+            {
+                "candidates": result.candidates_by_country,
+                "exclusions": result.exclusions_by_country,
+                "output": str(result.output),
+                "sha256": result.output_sha256,
+                "receipt": str(result.receipt),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spectrajam")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -261,12 +388,15 @@ def build_parser() -> argparse.ArgumentParser:
     sample = subparsers.add_parser("sample")
     sample.add_argument("--config", required=True)
     sample.add_argument("--candidates", required=True)
+    sample.add_argument("--candidate-receipt", required=True)
     sample.add_argument("--output", required=True)
+    sample.add_argument("--receipt")
     sample.set_defaults(handler=_sample)
 
     ledger_init = subparsers.add_parser("ledger-init")
     ledger_init.add_argument("--config", required=True)
     ledger_init.add_argument("--manifest", required=True)
+    ledger_init.add_argument("--sampling-receipt", required=True)
     ledger_init.add_argument("--database", required=True)
     ledger_init.add_argument("--modalities", nargs="+", default=["s1", "s2"])
     ledger_init.set_defaults(handler=_ledger_init)
@@ -309,6 +439,21 @@ def build_parser() -> argparse.ArgumentParser:
     model_smoke.add_argument("--seed", type=int, default=20260701)
     model_smoke.add_argument("--batch-size", type=int, default=4)
     model_smoke.set_defaults(handler=_model_smoke)
+
+    frame_sources = subparsers.add_parser("fetch-frame-sources")
+    frame_sources.add_argument("--source-root", default="data/frame")
+    frame_sources.add_argument("--receipt")
+    frame_sources.add_argument("--max-attempts", type=int, default=5)
+    frame_sources.set_defaults(handler=_fetch_frame_sources)
+
+    candidate_frame = subparsers.add_parser("candidate-frame")
+    candidate_frame.add_argument("--config", required=True)
+    candidate_frame.add_argument("--source-root", default="data/frame")
+    candidate_frame.add_argument("--output", required=True)
+    candidate_frame.add_argument("--receipt", required=True)
+    candidate_frame.add_argument("--max-attempts", type=int, default=5)
+    candidate_frame.add_argument("--chunk-size", type=int, default=50_000)
+    candidate_frame.set_defaults(handler=_candidate_frame)
 
     return parser
 

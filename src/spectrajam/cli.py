@@ -315,6 +315,10 @@ def _materialize(args: argparse.Namespace) -> int:
         output_root=args.output,
         profile=profile,
         modalities=ledger.modalities(),
+        verify_remote_assets=True,
+        max_attempts=args.asset_attempts or config.retry.max_attempts,
+        base_delay_seconds=config.retry.base_delay_seconds,
+        max_delay_seconds=config.retry.max_delay_seconds,
     )
     implementation_sha256 = materializer_contract_sha256()
     ledger.bind_metadata("catalog_inventory_sha256", catalog_inventory_sha256)

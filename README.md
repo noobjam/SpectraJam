@@ -206,7 +206,9 @@ Materialize the real smoke point histories as a detached, resumable job. The
 command first validates every catalog/item checksum and output publication,
 then immutably binds both that catalog inventory and the exact
 materializer/preprocessing/point-store/runtime contract to the existing ledger
-before it claims a task. `RUNNING` is replaced by the numeric process exit code.
+before it claims a task. It also signs and opens representative S1/S2 COGs, so
+missing MPC data-plane access cannot poison ledger tasks. `RUNNING` is replaced
+by the numeric process exit code.
 
 ```bash
 mkdir -p runs/logs

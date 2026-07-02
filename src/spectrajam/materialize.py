@@ -152,6 +152,12 @@ def preflight_materialization(
     output_root: str | Path,
     profile: Any,
     modalities: Sequence[str] = ("s1", "s2"),
+    verify_remote_assets: bool = False,
+    max_attempts: int = 3,
+    base_delay_seconds: float = 0.5,
+    max_delay_seconds: float = 30.0,
+    remote_sampler: AssetSampler | None = None,
+    remote_signer: Callable[[str], str] | None = None,
 ) -> str:
     """Validate every immutable input and output publication before claiming work."""
     from .stac import read_catalog_snapshot
@@ -160,9 +166,11 @@ def preflight_materialization(
     if not requested or any(value not in {"s1", "s2"} for value in requested):
         raise ContractError("materialization modalities must contain s1 and/or s2")
     inventory = []
+    representatives: dict[str, tuple[Any, Any]] = {}
     for identity, tile in sorted(tile_by_identity.items()):
         for modality in requested:
             snapshot = read_catalog_snapshot(catalog_root, tile, modality, profile)
+            representatives.setdefault(modality, (snapshot.items[0], tile))
             inventory.append(
                 {
                     "country": identity[0],
@@ -183,6 +191,39 @@ def preflight_materialization(
             os.fsync(stream.fileno())
     finally:
         probe.unlink(missing_ok=True)
+
+    if verify_remote_assets:
+        sampler = remote_sampler or sample_cog_points
+        signer = remote_signer or sign_mpc_href
+        checks = {
+            "s2": (("SCL", "nearest", "scl"), ("B04", "bilinear", "s2")),
+            "s1": (("vv", "nearest", "s1"), ("vh", "nearest", "s1")),
+        }
+        for modality in requested:
+            item, tile = representatives[modality]
+            assets = _item_assets(item, tuple(check[0] for check in checks[modality]))
+            coordinate = (
+                (item.bbox[0] + item.bbox[2]) / 2,
+                (item.bbox[1] + item.bbox[3]) / 2,
+            )
+            for asset_key, resampling, kind in checks[modality]:
+                _sample_asset(
+                    item_id=item.id,
+                    asset_key=asset_key,
+                    unsigned_href=assets[asset_key],
+                    coordinates=[coordinate],
+                    resampling=resampling,
+                    kind=kind,
+                    sampler=sampler,
+                    signer=signer,
+                    max_attempts=max_attempts,
+                    base_delay_seconds=base_delay_seconds,
+                    max_delay_seconds=max_delay_seconds,
+                    heartbeat=lambda: None,
+                    task_ids=[],
+                    target_crs=_COUNTRY_TARGET_CRS[tile.country],
+                    target_resolution=_TARGET_RESOLUTION_METERS,
+                )
     encoded = json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 

@@ -326,10 +326,12 @@ The implemented materializer:
 - make reruns reuse valid completed work without replacing points.
 
 It validates all catalogs and the output path before claiming work, binds the
-catalog-inventory and implementation/runtime SHAs to the existing ledger, keeps signed SAS URLs out of
-artifacts/errors, renews leases during block reads and publication, and scopes
-a failed asset to only its applicable points. This implementation is gated to
-the smoke config; batched pilot/full Parquet publication is still required.
+catalog-inventory and implementation/runtime SHAs to the existing ledger, keeps
+signed SAS URLs out of artifacts/errors, renews leases during block reads and
+publication, and scopes a failed asset to only its applicable points. The
+preflight also signs and opens representative S1/S2 assets before any claim.
+This implementation is gated to the smoke config; batched pilot/full Parquet
+publication is still required.
 
 The canonical durable units stay integer. Normalize to FP32 in the loader and
 use BF16 autocast only inside training.

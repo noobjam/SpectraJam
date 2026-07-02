@@ -17,6 +17,7 @@ from spectrajam.materialize import (
     _sample_asset,
     materialize_group_records,
     point_shard_path,
+    preflight_materialization,
     run_materialization,
     sample_cog_points,
 )
@@ -549,6 +550,40 @@ def test_runner_publishes_verified_shard_and_resolves_no_source(
         ).claimed
         == 0
     )
+
+
+def test_preflight_opens_representative_s1_and_s2_assets_before_claims(
+    tmp_path: Path, monkeypatch
+) -> None:
+    s2 = _snapshot("s2", (_item("s2-item", "2023-01-01T00:00:00+00:00", "e", "s2"),))
+    s1 = _snapshot("s1", (_item("s1-item", "2023-01-01T00:00:00+00:00", "f", "s1"),))
+    monkeypatch.setattr(
+        "spectrajam.stac.read_catalog_snapshot",
+        lambda _root, _tile, modality, _profile: {"s1": s1, "s2": s2}[modality],
+    )
+    opened = []
+
+    def sampler(href, coordinates, resampling, kind, _heartbeat, *_grid):
+        opened.append((href, resampling, kind))
+        return np.zeros(len(coordinates), dtype=np.float64)
+
+    digest = preflight_materialization(
+        tile_by_identity={("RWA", "block-1", 2023): s2.tile},
+        catalog_root=tmp_path / "catalog",
+        output_root=tmp_path / "points",
+        profile=object(),
+        verify_remote_assets=True,
+        remote_sampler=sampler,
+        remote_signer=lambda value: value,
+    )
+
+    assert len(digest) == 64
+    assert opened == [
+        ("unsigned://s1-item/vv", "nearest", "s1"),
+        ("unsigned://s1-item/vh", "nearest", "s1"),
+        ("unsigned://s2-item/SCL", "nearest", "scl"),
+        ("unsigned://s2-item/B04", "bilinear", "s2"),
+    ]
 
 
 def test_runner_scopes_a_bad_asset_to_its_applicable_tasks(tmp_path: Path, monkeypatch) -> None:

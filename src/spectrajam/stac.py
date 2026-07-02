@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
+from typing import Literal
 
 from .contracts import CANONICAL_S1_BANDS, CANONICAL_S2_BANDS, ContractError, PointYear
 
@@ -42,6 +46,28 @@ class WorkTile:
         ).encode()
         digest = hashlib.sha256(identity).hexdigest()[:16]
         return f"{self.country.lower()}-{self.year}-{digest}"
+
+
+CatalogModality = Literal["s1", "s2"]
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogItemRef:
+    id: str
+    acquired: datetime
+    raw_item_sha256: str
+    assets: Mapping[str, str]
+    bbox: tuple[float, float, float, float]
+    properties: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogSnapshot:
+    path: Path
+    sha256: str
+    tile: WorkTile
+    modality: CatalogModality
+    items: tuple[CatalogItemRef, ...]
 
 
 def build_work_tiles(
@@ -430,6 +456,106 @@ def _validate_persisted_catalog(
                     f"catalog asset summary does not match raw item: {path}/{asset_key}"
                 )
     return encoded, payload
+
+
+def _catalog_acquired(value: object, tile: WorkTile, item_id: str, path: Path) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ContractError(f"catalog item {item_id} has no acquisition datetime: {path}")
+    try:
+        acquired = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ContractError(
+            f"catalog item {item_id} has an invalid acquisition datetime: {path}"
+        ) from error
+    if acquired.tzinfo is None or acquired.utcoffset() is None:
+        raise ContractError(f"catalog item {item_id} acquisition datetime has no timezone: {path}")
+    acquired = acquired.astimezone(UTC)
+    if acquired.year != tile.year:
+        raise ContractError(
+            f"catalog item {item_id} acquisition year {acquired.year} "
+            f"does not match work-tile year {tile.year}: {path}"
+        )
+    return acquired
+
+
+def read_catalog_snapshot(
+    root: str | Path,
+    tile: WorkTile,
+    modality: CatalogModality,
+    profile: ProviderProfile = MPC_V11,
+) -> CatalogSnapshot:
+    """Validate one persisted query and return immutable, UTC-normalized item refs."""
+    path = catalog_snapshot_path(root, tile, modality)
+    if not path.is_file():
+        raise ContractError(f"catalog query is missing: {path}")
+    item_store = Path(root) / "items"
+    encoded, payload = _validate_persisted_catalog(path, item_store, tile, modality, profile)
+
+    refs = []
+    for summary in payload["items"]:
+        if not isinstance(summary, dict):  # validated above; keeps typing explicit
+            raise ContractError(f"catalog item summary must be a mapping: {path}")
+        item_id = summary.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            raise ContractError(f"catalog item has an invalid id: {path}")
+        digest = summary.get("raw_item_sha256")
+        if not isinstance(digest, str):  # validated above
+            raise ContractError(f"catalog item {item_id} has no raw-item digest: {path}")
+        raw_item = json.loads((item_store / f"{digest}.json").read_bytes())
+        raw_properties = raw_item.get("properties")
+        assets = summary.get("assets")
+        bbox_value = summary.get("bbox")
+        if not isinstance(raw_properties, dict) or not isinstance(assets, dict):
+            raise ContractError(f"catalog item {item_id} has invalid metadata: {path}")
+        if any(
+            not isinstance(key, str) or not isinstance(href, str) or not href
+            for key, href in assets.items()
+        ):
+            raise ContractError(f"catalog item {item_id} has an invalid asset href: {path}")
+        if not isinstance(bbox_value, (list, tuple)) or len(bbox_value) != 4:
+            raise ContractError(f"catalog item {item_id} has an invalid bbox: {path}")
+        try:
+            bbox = (
+                float(bbox_value[0]),
+                float(bbox_value[1]),
+                float(bbox_value[2]),
+                float(bbox_value[3]),
+            )
+        except (TypeError, ValueError) as error:
+            raise ContractError(f"catalog item {item_id} has an invalid bbox: {path}") from error
+        if (
+            not all(math.isfinite(value) for value in bbox)
+            or bbox[0] > bbox[2]
+            or bbox[1] > bbox[3]
+        ):
+            raise ContractError(f"catalog item {item_id} has an invalid bbox: {path}")
+        acquired = _catalog_acquired(summary.get("datetime"), tile, item_id, path)
+        raw_datetime = raw_properties.get("datetime")
+        if raw_datetime is not None and (
+            _catalog_acquired(raw_datetime, tile, item_id, path) != acquired
+        ):
+            raise ContractError(
+                f"catalog item {item_id} datetime does not match its raw document: {path}"
+            )
+        refs.append(
+            CatalogItemRef(
+                id=item_id,
+                acquired=acquired,
+                raw_item_sha256=digest,
+                assets=MappingProxyType(dict(assets)),
+                bbox=bbox,
+                properties=MappingProxyType(dict(raw_properties)),
+            )
+        )
+
+    refs.sort(key=lambda item: (item.acquired, item.id, item.raw_item_sha256))
+    return CatalogSnapshot(
+        path=path,
+        sha256=hashlib.sha256(encoded).hexdigest(),
+        tile=tile,
+        modality=modality,
+        items=tuple(refs),
+    )
 
 
 def discover_catalogs(

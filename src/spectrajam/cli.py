@@ -187,7 +187,15 @@ def _ledger_init(args: argparse.Namespace) -> int:
 
 def _ledger_status(args: argparse.Namespace) -> int:
     ledger = AcquisitionLedger(args.database)
-    print(json.dumps({"summary": ledger.summary(), "failures": ledger.failures(args.limit)}))
+    print(
+        json.dumps(
+            {
+                "summary": ledger.summary(),
+                "outcomes": ledger.outcomes(),
+                "failures": ledger.failures(args.limit),
+            }
+        )
+    )
     return 0
 
 
@@ -247,6 +255,112 @@ def _catalog_discover(args: argparse.Namespace) -> int:
             }
         )
     )
+    return 0
+
+
+def _materialize(args: argparse.Namespace) -> int:
+    from .materialize import (
+        default_worker_id,
+        json_progress,
+        materializer_contract_sha256,
+        preflight_materialization,
+        run_materialization,
+    )
+
+    if args.max_groups is not None and args.max_groups < 1:
+        raise ContractError("--max-groups must be positive")
+    if args.asset_attempts is not None and args.asset_attempts < 1:
+        raise ContractError("--asset-attempts must be positive")
+    config = load_config(args.config)
+    if config.stage != "smoke":
+        raise ContractError(
+            "the v1 per-point materializer is smoke-only; pilot/full require "
+            "batched Parquet shards to avoid millions of tiny files"
+        )
+    verify_sampling_receipt(args.manifest, args.config, args.sampling_receipt)
+    records = list(
+        validate_manifest_universe(
+            read_manifest(args.manifest),
+            config.countries,
+            {
+                "train": config.years.train,
+                "validation": config.years.validation,
+                "test": config.years.test,
+            },
+            config.sampling.points_per_country,
+        )
+    )
+    profile = ProviderProfile(
+        name=config.stac.profile,
+        endpoint=config.stac.endpoint,
+        collections=config.stac.collections,
+        checkpoint_source=config.base_model.data_source,
+    )
+    tiles = {
+        (tile.country, tile.spatial_block, tile.year): tile for tile in build_work_tiles(records)
+    }
+    ledger = AcquisitionLedger(args.database)
+    ledger.require_binding(
+        manifest_sha256=sha256_file(args.manifest),
+        config_sha256=sha256_file(args.config),
+        sampling_receipt_sha256=sha256_file(args.sampling_receipt),
+    )
+    print(
+        json.dumps({"event": "materialization-preflight", "work_tiles": len(tiles)}),
+        flush=True,
+    )
+    catalog_inventory_sha256 = preflight_materialization(
+        tile_by_identity=tiles,
+        catalog_root=args.catalog_root,
+        output_root=args.output,
+        profile=profile,
+        modalities=ledger.modalities(),
+    )
+    implementation_sha256 = materializer_contract_sha256()
+    ledger.bind_metadata("catalog_inventory_sha256", catalog_inventory_sha256)
+    ledger.bind_metadata("materializer_contract_sha256", implementation_sha256)
+    print(
+        json.dumps(
+            {
+                "event": "materialization-preflight-complete",
+                "catalog_inventory_sha256": catalog_inventory_sha256,
+                "materializer_contract_sha256": implementation_sha256,
+            }
+        ),
+        flush=True,
+    )
+    result = run_materialization(
+        ledger=ledger,
+        tile_by_identity=tiles,
+        catalog_root=args.catalog_root,
+        output_root=args.output,
+        profile=profile,
+        worker_id=args.worker_id or default_worker_id(),
+        batch_points=args.batch_points,
+        lease_seconds=config.retry.lease_seconds,
+        max_attempts=args.asset_attempts or config.retry.max_attempts,
+        base_delay_seconds=config.retry.base_delay_seconds,
+        max_delay_seconds=config.retry.max_delay_seconds,
+        max_groups=args.max_groups,
+        progress=json_progress,
+        implementation_sha256=implementation_sha256,
+    )
+    print(
+        json.dumps(
+            {
+                "result": asdict(result),
+                "summary": ledger.summary(),
+                "outcomes": ledger.outcomes(),
+                "output": args.output,
+            },
+            sort_keys=True,
+        )
+    )
+    summary = ledger.summary()
+    if summary["failed"]:
+        return 2
+    if any(summary[state] for state in ("pending", "retry", "running")):
+        return 3
     return 0
 
 
@@ -420,6 +534,19 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_discover.add_argument("--output", required=True)
     catalog_discover.add_argument("--modalities", nargs="+", default=["s1", "s2"])
     catalog_discover.set_defaults(handler=_catalog_discover)
+
+    materialize = subparsers.add_parser("materialize")
+    materialize.add_argument("--config", required=True)
+    materialize.add_argument("--manifest", required=True)
+    materialize.add_argument("--sampling-receipt", required=True)
+    materialize.add_argument("--catalog-root", required=True)
+    materialize.add_argument("--database", required=True)
+    materialize.add_argument("--output", required=True)
+    materialize.add_argument("--worker-id")
+    materialize.add_argument("--batch-points", type=int, default=256)
+    materialize.add_argument("--asset-attempts", type=int)
+    materialize.add_argument("--max-groups", type=int)
+    materialize.set_defaults(handler=_materialize)
 
     parity = subparsers.add_parser("verify-upstream-parity")
     parity.add_argument("--config", required=True)

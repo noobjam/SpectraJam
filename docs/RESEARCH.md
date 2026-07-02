@@ -132,6 +132,52 @@ and the receipt records the number repaired. WorldCover sampling uses numeric
 2021 v200 classes with nearest-neighbor point lookup; nodata 0 and permanent
 water 80 are excluded from the land frame.
 
+## MPC materialization evidence
+
+The live Planetary Computer
+[`sentinel-2-l2a`](https://planetarycomputer.microsoft.com/api/stac/v1/collections/sentinel-2-l2a)
+schema uses case-sensitive spectral asset keys and mixed native resolutions:
+`B02/B03/B04/B08` are 10 m, while `B05/B06/B07/B8A/B11/B12` and categorical
+`SCL` are 20 m. An [official example
+item](https://planetarycomputer.microsoft.com/api/stac/v1/collections/sentinel-2-l2a/items/S2A_MSIL2A_20230626T080611_R078_T35MRT_20240928T202822)
+exposes raw single-band COGs; inspection found `uint16` spectral DN with nodata
+0 and `uint8` SCL with nodata 0, without a raster scale/offset transform. The
+compatibility path therefore retains raw integer units, resamples spectral
+bands bilinearly and SCL by nearest neighbor, and applies the pinned order and
+SCL-invalid set `{0,1,2,3,8,9}`.
+
+Microsoft's [baseline-change
+example](https://github.com/microsoft/PlanetaryComputerExamples/blob/19ccd72df94c82b164ec9ca0d7772b79c34ce308/datasets/sentinel-2-l2a/baseline-change.ipynb)
+confirms that the post-2022-01-25 offset remains in MPC imagery. Its generic
+harmonizer clips post-cutoff spectral values below 1000 before subtracting;
+[pinned TESSERA](https://github.com/ucam-eo/tessera/blob/d06ee44a053246db3e73f104403f6eaf642e1abf/tessera_preprocessing/s2_fast_processor.py#L394-L416)
+instead subtracts only where values are at least 1000. SpectraJam retains the
+latter checkpoint-compatibility behavior, but sub-1000 parity remains part of
+the mandatory upstream fixture rather than a settled physical-value claim.
+
+The official MPC
+[`sentinel-1-rtc`](https://planetarycomputer.microsoft.com/api/stac/v1/collections/sentinel-1-rtc)
+metadata describes `vv`/`vh` COG values as calibrated, terrain-corrected gamma
+naught intensity. A [representative official
+item](https://planetarycomputer.microsoft.com/api/stac/v1/collections/sentinel-1-rtc/items/S1A_IW_GRDH_1SDV_20230622T034540_20230622T034605_049093_05E748_rtc)
+has `float32` assets, nodata -32768, 10 m pixels, and raster tags
+`SARPixelContent=intensity` and `Scale=linear`. Nevertheless, pinned TESSERA
+applies its named [amplitude transform of
+`20*log10`](https://github.com/ucam-eo/tessera/blob/d06ee44a053246db3e73f104403f6eaf642e1abf/tessera_preprocessing/s1_fast_processor.py#L758-L800).
+SpectraJam preserves that transform for checkpoint compatibility; it must not
+be described as physically canonical intensity dB. The upstream stackstac path
+also defaults to float64 while direct Rasterio reads are float32, so exact
+truncation parity still requires the official fixture.
+
+Catalog snapshots retain unsigned asset hrefs. The official Planetary Computer
+[SDK guidance](https://github.com/microsoft/planetary-computer-sdk-for-python/blob/90ef249ef0ab92045e39a8400fa30eddf14d3c37/README.md#usage)
+signs an href, asset, or item just before access. Its [SAS
+implementation](https://github.com/microsoft/planetary-computer-sdk-for-python/blob/90ef249ef0ab92045e39a8400fa30eddf14d3c37/planetary_computer/sas.py#L418-L477)
+refreshes cached tokens near expiry, but treats a URL already containing SAS
+parameters as already signed. Each retry must therefore start from the stored
+unsigned href, obtain a fresh signature, and open a new raster handle; retrying
+an expired signed URL can never refresh it.
+
 ## Local audit result
 
 TesseraCrop cannot be treated as the canonical base. It uses the conventional

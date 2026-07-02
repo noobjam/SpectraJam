@@ -1,5 +1,6 @@
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,7 +18,9 @@ from spectrajam.stac import (
     STACCatalog,
     WorkTile,
     build_work_tiles,
+    catalog_snapshot_path,
     discover_catalogs,
+    read_catalog_snapshot,
     write_content_addressed_catalog_snapshot,
 )
 
@@ -170,6 +173,63 @@ def test_immutable_query_refuses_different_content(tmp_path) -> None:
     payload["query"]["collection"] = "different"
     with pytest.raises(ContractError, match="immutable"):
         write_content_addressed_catalog_snapshot(destination, tmp_path / "items", payload)
+
+
+def test_read_catalog_snapshot_returns_sorted_typed_refs_with_full_properties(
+    tmp_path,
+) -> None:
+    catalog = STACCatalog()
+    catalog._client = _Client(_Item([*CANONICAL_S2_BANDS, "SCL"]))
+    tile = WorkTile("RWA", "block", 2023, (29, -2, 30, -1), 10)
+    later = catalog.search(tile, "s2")["items"][0]
+    later["id"] = "item-later"
+    later["datetime"] = "2023-02-01T00:00:00+00:00"
+    later["raw_item"]["id"] = "item-later"
+    later["raw_item"]["properties"]["private:full_property"] = "kept"
+    earlier = deepcopy(later)
+    earlier["id"] = "item-earlier"
+    earlier["datetime"] = "2023-01-01T01:00:00+01:00"
+    earlier["raw_item"]["id"] = "item-earlier"
+    payload = catalog.search(tile, "s2")
+    payload["items"] = [later, earlier]
+    path = catalog_snapshot_path(tmp_path, tile, "s2")
+    result = write_content_addressed_catalog_snapshot(path, tmp_path / "items", payload)
+
+    snapshot = read_catalog_snapshot(tmp_path, tile, "s2")
+
+    assert snapshot.path == path
+    assert snapshot.sha256 == result.sha256
+    assert snapshot.tile == tile
+    assert snapshot.modality == "s2"
+    assert [item.id for item in snapshot.items] == ["item-earlier", "item-later"]
+    assert snapshot.items[0].acquired.tzinfo is UTC
+    assert snapshot.items[0].acquired == datetime(2023, 1, 1, tzinfo=UTC)
+    assert snapshot.items[0].assets["B04"] == "https://example/B04"
+    assert snapshot.items[0].properties["private:full_property"] == "kept"
+    assert snapshot.items[0].bbox == (1.0, 2.0, 3.0, 4.0)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("not-a-datetime", "invalid acquisition datetime"),
+        ("2023-01-01T00:00:00", "timezone"),
+        ("2024-01-01T00:00:00+00:00", "does not match work-tile year"),
+    ],
+)
+def test_read_catalog_snapshot_rejects_invalid_acquisition_datetime(
+    tmp_path, value: str, message: str
+) -> None:
+    catalog = STACCatalog()
+    catalog._client = _Client(_Item([*CANONICAL_S2_BANDS, "SCL"]))
+    tile = WorkTile("RWA", "block", 2023, (29, -2, 30, -1), 10)
+    payload = catalog.search(tile, "s2")
+    payload["items"][0]["datetime"] = value
+    path = catalog_snapshot_path(tmp_path, tile, "s2")
+    write_content_addressed_catalog_snapshot(path, tmp_path / "items", payload)
+
+    with pytest.raises(ContractError, match=message):
+        read_catalog_snapshot(tmp_path, tile, "s2")
 
 
 def test_s1_discovery_rejects_unknown_orbit_state() -> None:

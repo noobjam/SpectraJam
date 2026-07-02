@@ -13,6 +13,16 @@ from .contracts import ContractError, PointYear, sha256_file, stable_sample_id
 
 TERMINAL_STATES = {"succeeded", "failed"}
 ACTIVE_STATES = {"pending", "retry", "running"}
+OUTCOME_STATES = (
+    "complete",
+    "insufficient_valid_observations",
+    "no_source_observation",
+    "terminal_data_error",
+)
+NO_ARTIFACT_OUTCOMES = {
+    "insufficient_valid_observations",
+    "no_source_observation",
+}
 
 
 class IncompleteAcquisitionError(RuntimeError):
@@ -333,6 +343,97 @@ class AcquisitionLedger:
 
         return [self._task_from_row(row) for row in rows]
 
+    def claim_group(
+        self,
+        worker_id: str,
+        limit: int,
+        lease_seconds: int,
+        now: float | None = None,
+    ) -> list[Task]:
+        """Claim due tasks from the first due country/year/modality group."""
+        if not worker_id:
+            raise ContractError("worker_id is required")
+        if limit < 1 or lease_seconds < 1:
+            raise ContractError("limit and lease_seconds must be positive")
+        timestamp = time.time() if now is None else now
+        lease_until = timestamp + lease_seconds
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status='failed', lease_owner=NULL, lease_until=NULL,
+                    last_error='worker lease expired after final attempt', updated_at=?
+                WHERE status='running' AND lease_until < ? AND attempts >= max_attempts
+                """,
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status='retry', lease_owner=NULL, lease_until=NULL,
+                    last_error=COALESCE(last_error, 'worker lease expired'), updated_at=?
+                WHERE status='running' AND lease_until < ? AND attempts < max_attempts
+                """,
+                (timestamp, timestamp),
+            )
+            first = connection.execute(
+                """
+                SELECT country, year, modality FROM tasks
+                WHERE status IN ('pending', 'retry')
+                  AND next_attempt_at <= ?
+                  AND attempts < max_attempts
+                ORDER BY next_attempt_at, task_id
+                LIMIT 1
+                """,
+                (timestamp,),
+            ).fetchone()
+            rows = []
+            if first is not None:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM tasks
+                    WHERE status IN ('pending', 'retry')
+                      AND next_attempt_at <= ?
+                      AND attempts < max_attempts
+                      AND country=? AND year=? AND modality=?
+                    ORDER BY next_attempt_at, task_id
+                    LIMIT ?
+                    """,
+                    (
+                        timestamp,
+                        first["country"],
+                        first["year"],
+                        first["modality"],
+                        limit,
+                    ),
+                ).fetchall()
+                ids = [row["task_id"] for row in rows]
+                placeholders = ",".join("?" for _ in ids)
+                connection.execute(
+                    f"""
+                    UPDATE tasks
+                    SET status='running', attempts=attempts+1, lease_owner=?,
+                        lease_until=?, updated_at=?
+                    WHERE task_id IN ({placeholders})
+                    """,
+                    (worker_id, lease_until, timestamp, *ids),
+                )
+                rows = connection.execute(
+                    f"SELECT * FROM tasks WHERE task_id IN ({placeholders}) ORDER BY task_id",
+                    ids,
+                ).fetchall()
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+        return [self._task_from_row(row) for row in rows]
+
     def renew_lease(
         self, task_id_value: str, worker_id: str, lease_seconds: int, now: float | None = None
     ) -> None:
@@ -347,6 +448,43 @@ class AcquisitionLedger:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError(f"task {task_id_value} is not leased by {worker_id}")
+
+    def renew_leases(
+        self,
+        tasks: Iterable[Task],
+        worker_id: str,
+        lease_seconds: int,
+        now: float | None = None,
+    ) -> None:
+        """Atomically renew a collection of leases owned by one worker."""
+        if not worker_id:
+            raise ContractError("worker_id is required")
+        if lease_seconds < 1:
+            raise ContractError("lease_seconds must be positive")
+        ids = tuple(dict.fromkeys(task.task_id for task in tasks))
+        if not ids:
+            return
+        timestamp = time.time() if now is None else now
+        placeholders = ",".join("?" for _ in ids)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"""
+                UPDATE tasks SET lease_until=?, updated_at=?
+                WHERE task_id IN ({placeholders})
+                  AND status='running' AND lease_owner=?
+                """,
+                (timestamp + lease_seconds, timestamp, *ids, worker_id),
+            )
+            if cursor.rowcount != len(ids):
+                raise RuntimeError(f"not every task is leased by {worker_id}")
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
 
     @staticmethod
     def _task_from_row(row: sqlite3.Row) -> Task:
@@ -408,6 +546,37 @@ class AcquisitionLedger:
             if cursor.rowcount != 1:
                 raise RuntimeError(f"task {task.task_id} is not leased by {worker_id}")
 
+    def resolve_without_artifact(
+        self,
+        task: Task,
+        metadata: dict[str, object],
+        worker_id: str,
+        outcome: str = "no_source_observation",
+    ) -> None:
+        """Resolve a scientific terminal outcome that has no point-store shard."""
+        if outcome not in NO_ARTIFACT_OUTCOMES:
+            raise ContractError(f"unsupported no-artifact outcome: {outcome}")
+        stored_metadata = {**metadata, "outcome": outcome}
+        now = time.time()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE tasks
+                SET status='succeeded', artifact_uri=NULL, artifact_sha256=NULL,
+                    observation_count=0, artifact_metadata=?, lease_owner=NULL,
+                    lease_until=NULL, last_error=NULL, updated_at=?
+                WHERE task_id=? AND status='running' AND lease_owner=?
+                """,
+                (
+                    json.dumps(stored_metadata, sort_keys=True),
+                    now,
+                    task.task_id,
+                    worker_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"task {task.task_id} is not leased by {worker_id}")
+
     def fail(
         self,
         task: Task,
@@ -460,6 +629,46 @@ class AcquisitionLedger:
         result["total"] = sum(row["count"] for row in rows)
         return result
 
+    def outcomes(self) -> dict[str, int]:
+        """Count terminal scientific outcomes without changing the status model."""
+        result = {outcome: 0 for outcome in OUTCOME_STATES}
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT status, artifact_metadata FROM tasks "
+                "WHERE status IN ('succeeded', 'failed')"
+            ).fetchall()
+        for row in rows:
+            if row["status"] == "failed":
+                result["terminal_data_error"] += 1
+                continue
+            metadata = json.loads(row["artifact_metadata"] or "{}")
+            outcome = metadata.get("outcome", "complete")
+            if not isinstance(outcome, str) or not outcome:
+                outcome = "complete"
+            result.setdefault(outcome, 0)
+            result[outcome] += 1
+        return result
+
+    def seconds_until_due(self, now: float | None = None) -> float | None:
+        """Return the wait until work or lease recovery is due, or None if terminal."""
+        timestamp = time.time() if now is None else now
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT MIN(
+                    CASE
+                        WHEN status IN ('pending', 'retry') AND attempts < max_attempts
+                            THEN next_attempt_at
+                        WHEN status='running' THEN lease_until
+                    END
+                ) AS due_at
+                FROM tasks
+                """
+            ).fetchone()
+        if row is None or row["due_at"] is None:
+            return None
+        return max(0.0, float(row["due_at"]) - timestamp)
+
     def failures(self, limit: int = 20) -> list[dict[str, object]]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -471,21 +680,71 @@ class AcquisitionLedger:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def require_binding(self, manifest_sha256: str, config_sha256: str) -> None:
+    def require_binding(
+        self,
+        manifest_sha256: str,
+        config_sha256: str,
+        sampling_receipt_sha256: str | None = None,
+    ) -> None:
+        keys = ["manifest_sha256", "config_sha256"]
+        if sampling_receipt_sha256 is not None:
+            keys.append("sampling_receipt_sha256")
+        placeholders = ",".join("?" for _ in keys)
         with self._connect() as connection:
             values = {
                 row["key"]: row["value"]
                 for row in connection.execute(
-                    "SELECT key, value FROM metadata "
-                    "WHERE key IN ('manifest_sha256', 'config_sha256')"
+                    f"SELECT key, value FROM metadata WHERE key IN ({placeholders})",
+                    keys,
                 )
             }
         expected = {
             "manifest_sha256": manifest_sha256.lower(),
             "config_sha256": config_sha256.lower(),
         }
+        if sampling_receipt_sha256 is not None:
+            expected["sampling_receipt_sha256"] = sampling_receipt_sha256.lower()
         if values != expected:
             raise ContractError(f"ledger binding mismatch: expected {expected}, got {values}")
+
+    def bind_metadata(self, key: str, value: str) -> None:
+        """Bind an immutable acquisition input after validating its full inventory."""
+        if key not in {
+            "catalog_inventory_sha256",
+            "materializer_contract_sha256",
+        }:
+            raise ContractError(f"unsupported ledger metadata binding: {key}")
+        if not value:
+            raise ContractError("ledger metadata value is required")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+            if row is None:
+                connection.execute("INSERT INTO metadata(key, value) VALUES (?, ?)", (key, value))
+            elif row["value"] != value:
+                raise ContractError(
+                    f"ledger is bound to different {key}: {row['value']!r} != {value!r}"
+                )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def modalities(self) -> tuple[str, ...]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT value FROM metadata WHERE key='modalities'").fetchone()
+        if row is None:
+            raise ContractError("ledger has no modality binding")
+        try:
+            values = tuple(json.loads(row["value"]))
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ContractError("ledger modality binding is invalid") from error
+        if not values or any(value not in {"s1", "s2"} for value in values):
+            raise ContractError("ledger modality binding is invalid")
+        return values
 
     def assert_complete(self) -> None:
         summary = self.summary()

@@ -63,10 +63,12 @@ adaptation tracks. The real-data frame path now pins, retries, and verifies the
 World Bank v2 ADM0/NDLSA release, RESOLVE Ecoregions 2017, the ESA WorldCover
 2021 grid, and only the five country-covering WorldCover COGs. It streams a
 fixed-origin 200 m lattice in each pinned country UTM CRS into the sampler
-contract and writes a full provenance receipt. Sparse Sentinel COG-to-point
-materialization, a durable embedding cache, and the distributed training runner
-remain the next
-milestone. Capturing the official parity fixture is still a manual prerequisite.
+contract and writes a full provenance receipt. The smoke-only sparse Sentinel
+COG-to-point materializer is now implemented with catalog preflight, touched
+block reads, fresh signing/retry, immutable publication, and explicit ledger
+outcomes. Its first real VM run, the official parity fixture, batched
+pilot/full shards, a durable embedding cache, and the distributed training
+runner remain the next milestones.
 
 For the exact verified VM state, remaining gaps, and continuation order, see
 [Session handoff](docs/HANDOFF.md).
@@ -165,6 +167,8 @@ holdout.
 Discover every STAC page once per spatial work block and year. Completed query
 snapshots are immutable and safely reused after interruption; repeated raw STAC
 items are stored once by content hash rather than copied into every query.
+Library consumers use `read_catalog_snapshot` to validate those query/item
+hashes and receive item references with timezone-aware acquisition datetimes.
 
 ```bash
 spectrajam catalog-discover \
@@ -175,27 +179,59 @@ spectrajam catalog-discover \
 
 The implemented observation-format contract stores only ragged point histories:
 S2 as exact `uint16[10]` plus SCL, and S1 as exact scaled-dB `int16[2]` plus
-orbit. Every row binds the source item and catalog-query hashes. The forthcoming
-sparse materializer will write this format without persisting country-scale
-image cubes, and its training loader will normalize to FP32 before optional
-BF16 autocast.
+orbit. Every row binds the source-item document and catalog-query hashes. The
+smoke materializer reads touched COG blocks asset-major across a country/year,
+signs each canonical MPC href again on every retry, publishes one immutable
+verified shard per point-year-modality, and commits its outcome to SQLite only
+after publication. It never persists imagery cubes.
 
 Initialize the acquisition ledger:
 
 ```bash
 spectrajam ledger-init \
-  --config configs/pilot.yaml \
-  --manifest data/manifests/pilot.csv \
-  --sampling-receipt data/manifests/pilot.csv.receipt.json \
-  --database data/state/acquisition.sqlite
+  --config configs/smoke.yaml \
+  --manifest data/manifests/smoke.csv \
+  --sampling-receipt data/manifests/smoke.csv.receipt.json \
+  --database data/state/smoke-acquisition.sqlite
 
-spectrajam ledger-status --database data/state/acquisition.sqlite
-spectrajam ledger-assert-complete --database data/state/acquisition.sqlite
+spectrajam ledger-status --database data/state/smoke-acquisition.sqlite
+spectrajam ledger-assert-complete --database data/state/smoke-acquisition.sqlite
 ```
 
 Ledger initialization revalidates both countries, every configured year per
-candidate, stable IDs, and the expected pilot point count before binding the
+candidate, stable IDs, and the expected smoke point count before binding the
 database to sampling-receipt, manifest, and config hashes.
+
+Materialize the real smoke point histories as a detached, resumable job. The
+command first validates every catalog/item checksum and output publication,
+then immutably binds both that catalog inventory and the exact
+materializer/preprocessing/point-store/runtime contract to the existing ledger
+before it claims a task. `RUNNING` is replaced by the numeric process exit code.
+
+```bash
+mkdir -p runs/logs
+printf '%s\n' RUNNING > runs/smoke-materialize.exit
+
+nohup bash -c '
+  rc=0
+  .venv/bin/spectrajam materialize \
+    --config configs/smoke.yaml \
+    --manifest data/manifests/smoke.csv \
+    --sampling-receipt data/manifests/smoke.csv.receipt.json \
+    --catalog-root data/catalog \
+    --database data/state/smoke-acquisition.sqlite \
+    --output data/pointstore/smoke \
+  || rc=$?
+  printf "%s\n" "$rc" > runs/smoke-materialize.exit
+  exit "$rc"
+' > runs/logs/smoke-materialize.log 2>&1 < /dev/null &
+```
+
+Use `tail -f runs/logs/smoke-materialize.log` for progress and
+`spectrajam ledger-status --database data/state/smoke-acquisition.sqlite` for
+durable counts. The current per-point publication strategy is deliberately
+gated to `stage: smoke`; pilot/full acquisition first needs batched Parquet
+shards to avoid millions of tiny files.
 
 Training must not start unless `ledger-assert-complete` passes. A point is never
 silently replaced after a failed download. The trainer constructors also require

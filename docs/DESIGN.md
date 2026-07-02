@@ -94,7 +94,7 @@ not a legal-status judgment.
 
 ## 5. STAC acquisition and completeness
 
-Query STAC once per 10–20 km work tile and month/year, not once per point. The
+Query STAC once per 10–20 km work tile and year, not once per point. The
 client consumes all pagination links. Query snapshots are immutable and
 resumable, while repeated raw items are content-addressed once. It does not
 impose `eo:cloud_cover < 20`: that property summarizes a whole Sentinel tile
@@ -105,11 +105,20 @@ The durable ledger declares every expected `(sample_id, modality)` before work
 starts. The implemented generic worker loop uses leases and full-jitter retry.
 The point-store writer publishes immutable Parquet/Zstd shards with exact S2
 `uint16` and S1 scaled-dB `int16` units, returns their SHA-256, and the reader
-can enforce that digest. The future sparse imagery reader must commit those
-digests to the ledger, add just-in-time MPC signing, and use asset-major COG
-block reads. It must retry 408, 425, 429, 5xx, connection resets, and truncated
-reads while honoring `Retry-After`; schema errors and malformed requests remain
-terminal.
+can enforce that digest. The smoke sparse reader validates and binds the full
+catalog inventory before claiming work, signs canonical unsigned MPC hrefs on
+every attempt, reads touched COG blocks asset-major across each country/year,
+and commits only verified immutable shards. It retries 408, 425, 429, 5xx,
+connection resets, and truncated reads while honoring `Retry-After`; source
+schema errors remain terminal, while operator/storage errors abort without
+being mislabeled as scientific failures.
+
+Same-day S2 overlap selection is fixed solely by the first valid SCL item, as
+in pinned TESSERA, and that item supplies all ten bands. Same-day S1 VV and VH
+are mosaicked independently in deterministic item order. When their selected
+pixels come from different items, the row points to an immutable,
+content-addressed composite provenance document containing both raw STAC item
+IDs and hashes.
 
 Every anchor-year eventually receives one terminal data outcome:
 
@@ -118,13 +127,14 @@ Every anchor-year eventually receives one terminal data outcome:
 - no source observation
 - terminal data error
 
-The current ledger is bound to manifest/config hashes, rejects duplicate IDs,
-revalidates the country/year universe, streams inserts, implements
-success/failure and unresolved-state gating, and requires parity plus completion
-before trainer construction. The
-next materialization milestone adds the three explicit scientific terminal
-reasons and per-sensor observation counts. The invariant is that expected rows
-equal the sum of all terminal outcomes and unresolved rows equal zero.
+The ledger is bound to sampling-receipt, manifest, config, validated catalog
+inventory, and materializer implementation/runtime hashes. It rejects
+duplicate IDs, revalidates the country/year universe, streams inserts, records
+source/valid counts in artifact metadata,
+and reports all four outcomes while preserving the existing scheduler schema.
+The invariant is that expected tasks equal the sum of all terminal outcomes and
+unresolved tasks equal zero. The per-point writer is intentionally smoke-only;
+pilot/full runs require deterministic shared Parquet shards and row indexes.
 
 ## 6. Cloud and observation quality
 

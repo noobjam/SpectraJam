@@ -21,14 +21,14 @@ not the semantic definition of an embedding.
 
 No regional model has been scientifically trained yet. The real checkpoint and
 CUDA execution paths have been proven, but their inputs were deterministic
-synthetic observations. The authoritative candidate-frame source registry and
-200 m Rwanda+Israel land-frame builder are now implemented. The next milestone
-starts by reproducing that frame on the VM, selecting the 128/country smoke
-universe, and materializing real sparse Sentinel observations.
+synthetic observations. The VM has now reproduced the authoritative frame,
+selected the 128/country smoke universe, initialized all 1,536 acquisition
+tasks, and persisted the complete STAC catalog. The sparse materializer is
+implemented and tested; the next action is its first real MPC smoke run.
 
 ## Verified VM state
 
-The following was verified on the training VM on 2026-07-01:
+The following was verified on the training VM on 2026-07-01 through 2026-07-02:
 
 - 8 × NVIDIA H100 80 GB HBM3;
 - all-to-all `NV18` GPU connectivity in one NUMA domain;
@@ -145,6 +145,17 @@ yet been captured.
 - S2 `uint16[10]`, SCL, validity, source-item/query provenance;
 - S1 scaled-dB `int16[2]`, orbit, validity, source-item/query provenance;
 - duplicate observation rejection and optional read-time SHA verification.
+- typed validation of persisted catalog queries and raw item documents;
+- smoke-only country/year asset-major materialization with touched-block reads;
+- a common country-UTM 10 m compatibility grid, nearest SCL/S1 and bilinear S2;
+- fresh just-in-time MPC signing on every bounded asset retry;
+- deterministic same-day S2 selection fixed by the first valid SCL item;
+- independent S1 VV/VH mosaics with content-addressed composite provenance;
+- per-point immutable publication, read-back validation, and ledger commit;
+- explicit complete, insufficient-valid, no-source, and terminal-error counts;
+- preflight binding of the exact catalog inventory before any task is claimed.
+- resume binding of materializer, preprocessing, point-store, Rasterio/GDAL,
+  NumPy, PyArrow, and MPC SDK versions so partial runs cannot mix semantics.
 
 ### Exact MPC value transforms
 
@@ -152,9 +163,10 @@ yet been captured.
 - SCL compatibility validity classes;
 - S1 amplitude-to-shifted/scaled-dB conversion matching upstream truncation.
 
-The S1 transform intentionally follows NumPy float32 behavior. Exact integer
-boundaries can differ by one unit across NumPy/libm builds because upstream
-truncates rather than rounds; tests use stable non-boundary values.
+The S1 compatibility transform promotes direct Rasterio samples to float64
+before the logarithm, matching stackstac's pinned default dtype. Exact
+integer-boundary equivalence still belongs to the official parity fixture
+because upstream truncates rather than rounds.
 
 ## Committed experiment sizes
 
@@ -209,7 +221,9 @@ The real smoke selection then passed its own receipt gate:
 - 1,536 pending ledger tasks (768 point-years × S1/S2), zero failures, with
   the ledger bound to that sampling receipt plus the manifest and config;
 - 333 country/block/year STAC work tiles;
-- current local test result: `140 passed, 1 CUDA-only skipped`;
+- 666 immutable S1/S2 query snapshots, 78,287 item references, and 7,893
+  content-addressed raw STAC item documents on the VM;
+- current local test result: `163 passed, 1 CUDA-only skipped`;
 - `validate-config --operational` passes with the pinned frame and checkpoint.
 
 Primary stratification is RESOLVE ecoregion × ESA WorldCover 2021. Elevation,
@@ -224,14 +238,15 @@ These gaps are intentional and must not be described as production-ready:
    implemented frame currently persists only the declared primary stratum.
 2. A committed smoke manifest; generated frame/source artifacts remain ignored
    data products and must be reproduced on the VM.
-3. Sparse Sentinel COG-to-point raster reading and just-in-time MPC URL signing.
-4. STAC → transform → Parquet → ledger transaction integration.
-5. Explicit scientific terminal outcomes for no/insufficient observations.
-6. A Parquet-to-`ObservationBatch` loader and shard-aware batch sampler.
-7. The canonical official CPU/FP32 upstream parity fixture.
-8. A resumable epoch/checkpoint training runner with AMP and DDP.
-9. Real frozen-baseline, Student, or LoRA training/evaluation artifacts.
-10. A durable incremental embedding cache.
+3. A completed real MPC materialization run; all 1,536 VM tasks are still
+   pending at this handoff.
+4. Batched Parquet publication for pilot/full scale. The current per-point
+   writer is intentionally smoke-only to avoid millions of tiny files.
+5. A Parquet-to-`ObservationBatch` loader and shard-aware batch sampler.
+6. The canonical official CPU/FP32 upstream parity fixture.
+7. A resumable epoch/checkpoint training runner with AMP and DDP.
+8. Real frozen-baseline, Student, or LoRA training/evaluation artifacts.
+9. A durable incremental embedding cache.
 
 `spectrajam validate-config --operational` now succeeds after
 `fetch-frame-sources` has installed the pinned ADM0 file (and after the pinned
@@ -239,7 +254,8 @@ checkpoint exists when the command also requests it).
 
 ## Next milestone: real smoke-data vertical slice
 
-Implement this sequence; do not restart with GPU validation.
+Frame construction, smoke selection, ledger initialization, and catalog
+discovery are complete on the VM. Do not restart them or redo GPU validation.
 
 ### 1. Reproduce the candidate frame on the VM
 
@@ -281,12 +297,12 @@ spectrajam catalog-discover \
   --output data/catalog
 ```
 
-These commands are implemented but still need to be run against the reproduced
-VM frame. Confirm exactly 128 selected anchors per country before acquisition.
+These commands completed on the VM: exactly 128 anchors per country, 768
+point-years, 1,536 pending tasks, and 666 query snapshots were recorded.
 
-### 3. Implement sparse asset-major materialization
+### 3. Run sparse asset-major materialization
 
-The materializer must:
+The implemented materializer:
 
 - process STAC item/date assets across all points in a work unit, never query
   or open COGs once per point;
@@ -308,6 +324,12 @@ The materializer must:
 - commit artifact URI, SHA, observation count, and provenance to SQLite only
   after immutable publication succeeds;
 - make reruns reuse valid completed work without replacing points.
+
+It validates all catalogs and the output path before claiming work, binds the
+catalog-inventory and implementation/runtime SHAs to the existing ledger, keeps signed SAS URLs out of
+artifacts/errors, renews leases during block reads and publication, and scopes
+a failed asset to only its applicable points. This implementation is gated to
+the smoke config; batched pilot/full Parquet publication is still required.
 
 The canonical durable units stay integer. Normalize to FP32 in the loader and
 use BF16 autocast only inside training.
@@ -363,26 +385,34 @@ git pull --ff-only
 python -m pip install -e ".[data,train,dev]"
 pytest -q
 
-# These are already verified; rerunning is optional and idempotent.
-spectrajam fetch-checkpoint --config configs/smoke.yaml
-spectrajam model-smoke --config configs/smoke.yaml --device cuda:0
+mkdir -p runs/logs
+printf '%s\n' RUNNING > runs/smoke-materialize.exit
 
-# This is the new milestone to run on the VM.
-spectrajam fetch-frame-sources --source-root data/frame
-spectrajam candidate-frame \
-  --config configs/smoke.yaml \
-  --source-root data/frame \
-  --output data/candidates.csv \
-  --receipt data/candidates.receipt.json
-spectrajam sample \
-  --config configs/smoke.yaml \
-  --candidates data/candidates.csv \
-  --candidate-receipt data/candidates.receipt.json \
-  --output data/manifests/smoke.csv
+nohup bash -c '
+  rc=0
+  .venv/bin/spectrajam materialize \
+    --config configs/smoke.yaml \
+    --manifest data/manifests/smoke.csv \
+    --sampling-receipt data/manifests/smoke.csv.receipt.json \
+    --catalog-root data/catalog \
+    --database data/state/smoke-acquisition.sqlite \
+    --output data/pointstore/smoke \
+  || rc=$?
+  printf "%s\n" "$rc" > runs/smoke-materialize.exit
+  exit "$rc"
+' > runs/logs/smoke-materialize.log 2>&1 < /dev/null &
 ```
 
-Expected checkpoint output has `reused: true`. Do not repeat topology or generic
-GPU diagnostics unless CUDA behavior actually regresses.
+Record the printed PID. Monitor with:
+
+```bash
+tail -f runs/logs/smoke-materialize.log
+cat runs/smoke-materialize.exit
+spectrajam ledger-status --database data/state/smoke-acquisition.sqlite
+```
+
+Do not repeat topology, checkpoint, model-smoke, frame, sampling, or catalog
+commands unless their recorded artifacts actually fail validation.
 
 ## Useful code entry points
 
@@ -392,6 +422,7 @@ GPU diagnostics unless CUDA behavior actually regresses.
 - `src/spectrajam/candidate_frame.py`: lattice, land mask, strata, and receipt.
 - `src/spectrajam/sampling.py`: candidate selection and manifest expansion.
 - `src/spectrajam/stac.py`: query planning and immutable discovery snapshots.
+- `src/spectrajam/materialize.py`: sparse COG reads, selection, retry, and commit.
 - `src/spectrajam/preprocessing.py`: parity-critical raw transforms.
 - `src/spectrajam/pointstore.py`: canonical durable observation schema.
 - `src/spectrajam/ledger.py`: task leases, retries, artifacts, and gates.
@@ -414,8 +445,11 @@ GPU diagnostics unless CUDA behavior actually regresses.
 - A non-default `--source-root` also requires matching `extent_policy` paths in
   the config; the committed contracts intentionally point to `data/frame`.
 - The successful VM Torch/CUDA package version is not yet pinned in a lockfile.
-- Current catalog discovery is work-block/year scoped; monthly atomic
-  materialization units still need to be introduced.
+- The smoke writer publishes one small Parquet per point-year-modality. Pilot
+  and full scale need deterministic shared shards plus row indexes before use.
+- The common 10 m grid and raw transforms are pinned from upstream behavior,
+  but exact end-to-end equivalence remains blocked on the official real-data
+  parity fixture.
 - Political-boundary provenance requires particular care for Israel; preserve
   the documented policy and receipts.
 - The 50 GiB project cap and free-space watermark are design decisions, not yet
@@ -425,12 +459,10 @@ GPU diagnostics unless CUDA behavior actually regresses.
 
 ```text
 Continue SpectraJam from docs/HANDOFF.md on public main. Do not redo hardware,
-checkpoint, or synthetic model-smoke validation unless a regression appears.
-Reproduce the now-implemented pinned candidate frame on the VM, select and
-validate the 128/country smoke manifest, initialize/discover its catalog, then
-implement the asset-major MPC COG-to-point materializer with immutable Parquet
-publication and ledger commits. Preserve the exact TESSERA v1.1 MPC band
-order/transforms and arbitrary-window contract. Run tests, review
-integrity/crash-resume behavior, update the handoff, and push working commits
-to noobjam/SpectraJam.
+checkpoint, frame, sampling, catalog, or synthetic model-smoke work unless a
+recorded artifact fails validation. Pull the implemented smoke materializer,
+run it with the documented nohup command, monitor its durable ledger, diagnose
+any scoped failures without replacing completed points, and close all 1,536
+terminal outcomes. Then capture the official real-data parity fixture and build
+the Parquet-to-ObservationBatch loader for the first real Student/LoRA step.
 ```

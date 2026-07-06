@@ -45,8 +45,8 @@ packages = ["src/spectrajam"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
-testpaths = ["tests"]
-pythonpath = ["src"]
+testpaths = ["tests", "plain_tessera_incremental/tests"]
+pythonpath = ["src", "."]
 
 [tool.ruff]
 line-length = 100

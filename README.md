@@ -73,6 +73,12 @@ runner remain the next milestones.
 For the exact verified VM state, remaining gaps, and continuation order, see
 [Session handoff](docs/HANDOFF.md).
 
+The independent frozen-model baseline in
+[`plain_tessera_incremental`](plain_tessera_incremental/README.md) is deliberately
+outside the regional LoRA/distillation track. It rasterizes labelled WKT fields
+to 10 m pixels, acquires MPC S1/S2 observations through STAC, and emits four
+cumulative plain-TESSERA embedding prefixes for the requested Harvard dataset.
+
 ## Setup
 
 ```bash

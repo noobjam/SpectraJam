@@ -55,7 +55,14 @@ band order, bilinear spectral resampling, nearest-neighbor SCL, the post-2022
 `-1000` BOA correction, compatibility SCL mask `{0,1,2,3,8,9}`, S1 scaled-dB
 conversion, orbit-specific S1 normalization, and deterministic 8…256 observation
 buckets. STAC item JSON is saved unsigned and assets are signed immediately
-before raster reads.
+before raster reads. Work-tile catalog results are filtered again against each
+tight pixel raster window, so edge-touching scenes that do not cover the
+requested field pixels are not sent to stackstac.
+
+`s2_source_count` is the number of retained calendar-day mosaics in a prefix;
+`s1_source_count` is the number of retained date-orbit mosaics. They are not raw
+STAC item counts. Per-pixel usable observations remain in `s2_valid_count` and
+`s1_valid_count`.
 
 ## Checkpoint
 

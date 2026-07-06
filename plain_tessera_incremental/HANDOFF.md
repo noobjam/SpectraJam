@@ -58,7 +58,7 @@ in `run.json` and must remain visible in later analysis.
 
 ## 3. Verification already completed locally
 
-- Full repository suite: 180 tests passed; 1 CUDA-only test skipped locally.
+- Full repository suite: 183 tests passed; 1 CUDA-only test skipped locally.
 - Ruff lint and format checks passed.
 - Python compilation passed.
 - The published 230 MB MPC encoder loaded successfully with SHA-256:

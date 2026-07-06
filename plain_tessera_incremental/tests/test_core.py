@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -11,6 +12,7 @@ import pandas as pd
 import shapely
 
 from plain_tessera_incremental.catalog import (
+    S2_ASSETS,
     detached_item_dicts,
     signed_item_dicts,
     unsigned_items,
@@ -30,7 +32,9 @@ from plain_tessera_incremental.inference import (
 )
 from plain_tessera_incremental.materialize import (
     MPCMaterializer,
+    NoSpatialCoverageError,
     PixelTimelines,
+    _items_intersecting_grid,
     scale_s1_amplitude,
     select_s1_daily_mosaic,
     select_s2_daily_mosaic,
@@ -198,6 +202,91 @@ class PreprocessingTests(unittest.TestCase):
         self.assertIsInstance(stack.call_args.args[0][0], dict)
         self.assertNotIn("sig=secret", str(raised.exception))
         self.assertNotIn("sig=secret", "\n".join(logs.output))
+        self.assertIn("https://blob.invalid/a.tif?<redacted>", str(raised.exception))
+
+    def test_materializer_skips_work_tile_scene_outside_tight_pixel_grid(self) -> None:
+        raw = {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": "S2C-edge-scene",
+            "geometry": None,
+            "bbox": [29.4, -1.75, 29.5, -1.65],
+            "properties": {
+                "datetime": "2025-02-05T08:11:51.025000Z",
+                "proj:code": "EPSG:32735",
+            },
+            "links": [],
+            "assets": {
+                name: {
+                    "href": f"https://example.invalid/{name}.tif",
+                    "proj:bbox": [699960.0, 9690220.0, 809760.0, 9800020.0],
+                }
+                for name in S2_ASSETS
+            },
+        }
+        materializer = MPCMaterializer(stack_chunksize=1, read_retries=0)
+
+        with patch.object(
+            materializer,
+            "_stack",
+            side_effect=AssertionError("non-overlapping scene must not be stacked"),
+        ) as stack:
+            timelines = materializer.materialize(
+                [raw],
+                [],
+                RasterWindow(32735, 77000, 981000, 1, 1, 10),
+                ("pixel",),
+                np.array([0], dtype=np.int64),
+                np.array([0], dtype=np.int64),
+            )
+
+        stack.assert_not_called()
+        self.assertEqual(timelines.s2_values.shape, (0, 1, 10))
+        self.assertEqual(timelines.s2_days.shape, (0,))
+
+    def test_materializer_skips_stackstac_zero_spatial_coverage_without_retry(self) -> None:
+        raw = {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": "edge-scene",
+            "geometry": None,
+            "bbox": [29.4, -1.75, 29.5, -1.65],
+            "properties": {"datetime": "2025-02-05T08:11:51.025000Z"},
+            "links": [],
+            "assets": {},
+        }
+        materializer = MPCMaterializer(stack_chunksize=1, read_retries=3)
+
+        with patch.object(
+            materializer,
+            "_stack",
+            side_effect=NoSpatialCoverageError("no spatial coverage"),
+        ) as stack:
+            timelines = materializer.materialize(
+                [raw],
+                [],
+                RasterWindow(32735, 77000, 981000, 1, 1, 10),
+                ("pixel",),
+                np.array([0], dtype=np.int64),
+                np.array([0], dtype=np.int64),
+            )
+
+        self.assertEqual(stack.call_count, 1)
+        self.assertEqual(timelines.s2_days.shape, (0,))
+
+    def test_wrapped_longitude_bounds_are_conservatively_retained(self) -> None:
+        item = SimpleNamespace(
+            bbox=(179.9, -1.0, -179.9, 1.0),
+            assets={},
+            properties={},
+        )
+        retained = _items_intersecting_grid(
+            [item],
+            [],
+            RasterWindow(32660, 0, 0, 1, 1, 10),
+            (179.8, -1.0, -179.8, 1.0),
+        )
+        self.assertEqual(retained, [item])
 
     def test_s1_scaled_db_reference_values(self) -> None:
         values = scale_s1_amplitude(np.array([1.0, 0.1, 0.0, np.nan], np.float32))

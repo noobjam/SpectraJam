@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 import logging
 from pathlib import Path
+import re
 import time
 from typing import Sequence
 
@@ -17,17 +18,102 @@ from .catalog import (
     signed_item_dicts,
     unsigned_items,
 )
-from .geometry import RasterWindow
+from .geometry import RasterWindow, projected_bounds_to_wgs84
 
 
 S2_BANDS = S2_ASSETS[:-1]
 INVALID_SCL = np.array([0, 1, 2, 3, 8, 9], dtype=np.int16)
 EPOCH = date(1970, 1, 1)
+_URL_QUERY = re.compile(r"(https?://[^?\s'\"<>]+)\?[^\s'\"<>]+")
+
+
+def _sanitized_error(error: Exception, limit: int = 2000) -> str:
+    message = _URL_QUERY.sub(r"\1?<redacted>", str(error))
+    return message if len(message) <= limit else f"{message[:limit]}…"
+
+
+class _SuppressUnsupportedSharingWarning(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "warp options does not support option SHARING" not in record.getMessage()
+
+
+logging.getLogger("rasterio._env").addFilter(_SuppressUnsupportedSharingWarning())
 LOGGER = logging.getLogger(__name__)
 
 
 def epoch_day(value: date) -> int:
     return (value - EPOCH).days
+
+
+def _positive_bbox_overlap(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> bool:
+    if first[0] > first[2] or second[0] > second[2]:
+        return True
+    return (
+        max(first[0], second[0]) < min(first[2], second[2])
+        and max(first[1], second[1]) < min(first[3], second[3])
+    )
+
+
+def _proj_epsg(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.upper().startswith("EPSG:"):
+        try:
+            return int(value.split(":", 1)[1])
+        except ValueError:
+            return None
+    return None
+
+
+def _items_intersecting_grid(
+    items: Sequence[object],
+    asset_names: Sequence[str],
+    grid: RasterWindow,
+    bounds_wgs84: tuple[float, float, float, float],
+) -> list[object]:
+    result: list[object] = []
+    for item in items:
+        projected_overlaps: list[bool] = []
+        all_assets_comparable = True
+        for name in asset_names:
+            asset = getattr(item, "assets", {}).get(name)
+            if asset is None:
+                all_assets_comparable = False
+                break
+            extra = getattr(asset, "extra_fields", {})
+            projected_bbox = extra.get("proj:bbox")
+            code = extra.get("proj:code", getattr(item, "properties", {}).get("proj:code"))
+            if code is None:
+                code = getattr(item, "properties", {}).get("proj:epsg")
+            if (
+                not isinstance(projected_bbox, (list, tuple))
+                or len(projected_bbox) != 4
+                or _proj_epsg(code) != grid.epsg
+            ):
+                all_assets_comparable = False
+                break
+            asset_bounds = tuple(float(value) for value in projected_bbox)
+            projected_overlaps.append(_positive_bbox_overlap(asset_bounds, grid.bounds))
+        if all_assets_comparable and projected_overlaps:
+            if any(projected_overlaps):
+                result.append(item)
+            continue
+
+        bbox = getattr(item, "bbox", None)
+        if bbox is None:
+            result.append(item)
+            continue
+        item_bounds = tuple(float(value) for value in bbox)
+        if _positive_bbox_overlap(item_bounds, bounds_wgs84):
+            result.append(item)
+    return result
+
+
+class NoSpatialCoverageError(RuntimeError):
+    """The requested assets do not cover the tight task raster window."""
 
 
 def harmonize_s2_mpc(values: np.ndarray) -> np.ndarray:
@@ -197,6 +283,10 @@ class MPCMaterializer:
                 actual_assets = tuple(
                     str(value) for value in data.coords["band"].values.tolist()
                 )
+                if not actual_assets or data.sizes.get("time", 0) == 0:
+                    raise NoSpatialCoverageError(
+                        "stackstac found no requested assets over the tight raster window"
+                    )
                 if actual_assets != tuple(assets):
                     raise RuntimeError(
                         "stackstac changed checkpoint-critical band order: "
@@ -209,22 +299,27 @@ class MPCMaterializer:
                         f"{grid.height}x{grid.width}"
                     )
                 return data.transpose("time", "band", "y", "x").compute().values
+            except NoSpatialCoverageError:
+                raise
             except Exception as error:
                 last_error = error
                 if attempt >= self.read_retries:
                     break
                 delay = min(2**attempt, 8)
                 LOGGER.warning(
-                    "raster read failed (%d/%d, %s); re-signing and retrying in %ds",
+                    "raster read failed (%d/%d, %s); re-signing and retrying in %ds: %s",
                     attempt + 1,
                     self.read_retries + 1,
                     type(error).__name__,
                     delay,
+                    _sanitized_error(error),
                 )
                 time.sleep(delay)
         error_type = type(last_error).__name__ if last_error is not None else "unknown"
+        error_message = _sanitized_error(last_error) if last_error is not None else "unknown"
         raise RuntimeError(
-            f"MPC raster read failed after retries; last error type: {error_type}"
+            "MPC raster read failed after retries; "
+            f"last error type: {error_type}: {error_message}"
         ) from None
 
     @staticmethod
@@ -259,12 +354,19 @@ class MPCMaterializer:
             raise ValueError("pixel IDs and raster indices do not align")
         s2_items = unsigned_items(raw_s2_items)
         s1_items = unsigned_items(raw_s1_items)
+        grid_bounds_wgs84 = projected_bounds_to_wgs84(grid.bounds, grid.epsg)
         s2_values: list[np.ndarray] = []
         s2_valid: list[np.ndarray] = []
         s2_days: list[int] = []
         for observed, items in self._group_s2(s2_items).items():
-            scl = self._stack(items, ["SCL"], grid, "nearest", rescale=False)
-            bands = self._stack(items, S2_BANDS, grid, "bilinear", rescale=False)
+            items = _items_intersecting_grid(items, S2_ASSETS, grid, grid_bounds_wgs84)
+            if not items:
+                continue
+            try:
+                scl = self._stack(items, ["SCL"], grid, "nearest", rescale=False)
+                bands = self._stack(items, S2_BANDS, grid, "bilinear", rescale=False)
+            except NoSpatialCoverageError:
+                continue
             values, valid = select_s2_daily_mosaic(
                 scl[:, 0, rows, columns],
                 bands[:, :, rows, columns],
@@ -278,7 +380,13 @@ class MPCMaterializer:
             "descending": ([], [], []),
         }
         for (observed, orbit), items in self._group_s1(s1_items).items():
-            bands = self._stack(items, S1_ASSETS, grid, "nearest", rescale=True)
+            items = _items_intersecting_grid(items, S1_ASSETS, grid, grid_bounds_wgs84)
+            if not items:
+                continue
+            try:
+                bands = self._stack(items, S1_ASSETS, grid, "nearest", rescale=True)
+            except NoSpatialCoverageError:
+                continue
             values, valid = select_s1_daily_mosaic(bands[:, :, rows, columns])
             value_list, valid_list, day_list = s1_by_orbit[orbit]
             value_list.append(values)

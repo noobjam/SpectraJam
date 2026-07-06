@@ -135,6 +135,7 @@ def prepare_field_pixels(
         latitude = float(row[config.latitude_column])
         status = "valid"
         reason = ""
+        coordinate_status = "not_checked"
         geometry_hash = canonical_sha256({"unparsed_wkt": _text(raw_wkt)})
         epsg: int | None = None
         cells: tuple[PixelCell, ...] = ()
@@ -144,11 +145,13 @@ def prepare_field_pixels(
             geometry_hash = canonical_geometry_sha256(geometry)
             min_lon, min_lat, max_lon, max_lat = geometry.bounds
             tolerance = 1e-9
-            if not (
+            within_wkt_bounds = (
                 min_lon - tolerance <= longitude <= max_lon + tolerance
                 and min_lat - tolerance <= latitude <= max_lat + tolerance
-            ):
-                raise ValueError("LONGITUDE/LATITUDE lies outside the WKT bounds")
+            )
+            coordinate_status = (
+                "within_wkt_bounds" if within_wkt_bounds else "outside_wkt_bounds"
+            )
             point = geometry.representative_point()
             epsg = utm_epsg(float(point.x), float(point.y))
             corner_epsgs = {
@@ -191,6 +194,7 @@ def prepare_field_pixels(
                 "geometry_sha256": geometry_hash,
                 "geometry_status": status,
                 "geometry_reason": reason,
+                "coordinate_status": coordinate_status,
                 "utm_epsg": epsg,
                 "pixel_count": len(cells),
                 "duplicate_ordinal": duplicate_ordinal,
@@ -454,6 +458,17 @@ def run_pipeline(config: PipelineConfig) -> dict[str, Any]:
         str(key): int(value)
         for key, value in fields["geometry_status"].value_counts().to_dict().items()
     }
+    coordinate_status_counts = {
+        str(key): int(value)
+        for key, value in fields["coordinate_status"].value_counts().to_dict().items()
+    }
+    outside_coordinate_count = coordinate_status_counts.get("outside_wkt_bounds", 0)
+    if outside_coordinate_count:
+        LOGGER.warning(
+            "%d fields have LONGITUDE/LATITUDE outside their WKT bounds; "
+            "WKT remains authoritative and the mismatch is recorded in fields.parquet",
+            outside_coordinate_count,
+        )
     invalid_fields = fields[fields["geometry_status"] == "invalid_field"]
     if not invalid_fields.empty:
         examples = invalid_fields[
@@ -472,6 +487,7 @@ def run_pipeline(config: PipelineConfig) -> dict[str, Any]:
         "field_pixel_membership_count": len(memberships),
         "expected_embedding_rows": expected_rows,
         "geometry_status_counts": status_counts,
+        "coordinate_status_counts": coordinate_status_counts,
         "outside_annual_contract_windows": [
             window.window_id for window in config.windows if window.duration_days > 366
         ],
@@ -492,6 +508,7 @@ def run_pipeline(config: PipelineConfig) -> dict[str, Any]:
             "completed": True,
             "embedding_rows": 0,
             "geometry_status_counts": status_counts,
+            "coordinate_status_counts": coordinate_status_counts,
             "message": "no field contained a snapped 10 m pixel center",
         }
         write_json_atomic(config.output_dir / "COMPLETED.json", completion)
@@ -629,6 +646,7 @@ def run_pipeline(config: PipelineConfig) -> dict[str, Any]:
         "field_pixel_membership_count": len(memberships),
         "embedding_rows": verified_embedding_rows,
         "geometry_status_counts": status_counts,
+        "coordinate_status_counts": coordinate_status_counts,
         "task_count": task_count,
     }
     write_json_atomic(config.output_dir / "COMPLETED.json", completion)

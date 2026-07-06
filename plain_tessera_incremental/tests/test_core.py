@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import shapely
 
+from plain_tessera_incremental.config import load_config
 from plain_tessera_incremental.geometry import (
     PixelCell,
     RasterChunk,
@@ -27,6 +28,7 @@ from plain_tessera_incremental.materialize import (
     select_s1_daily_mosaic,
     select_s2_daily_mosaic,
 )
+from plain_tessera_incremental.pipeline import prepare_field_pixels
 from plain_tessera_incremental.storage import write_embedding_shard
 from plain_tessera_incremental.windows import PrefixWindow
 from plain_tessera_incremental.windows import build_prefix_windows
@@ -75,6 +77,40 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual((window.width, window.height), (3, 4))
         self.assertEqual(window.local_indices(pixels[0]), (3, 0))
         self.assertEqual(window.local_indices(pixels[1]), (0, 2))
+
+    def test_wkt_remains_authoritative_when_auxiliary_coordinate_is_outside(self) -> None:
+        config = load_config(Path(__file__).parents[1] / "config.yaml")
+        geometry = shapely.box(3.0, 1.0, 3.0003, 1.0003)
+        source = pd.DataFrame(
+            {
+                "LONGITUDE": [4.0],
+                "LATITUDE": [2.0],
+                "QUADKEY": ["q"],
+                "landcover": ["crop"],
+                "wkt": [geometry.wkt],
+                "id": [622],
+            }
+        )
+
+        outside_fields, outside_pixels, outside_memberships = prepare_field_pixels(
+            source, config
+        )
+        source.loc[0, ["LONGITUDE", "LATITUDE"]] = [3.00015, 1.00015]
+        inside_fields, inside_pixels, _ = prepare_field_pixels(source, config)
+
+        self.assertEqual(outside_fields.loc[0, "geometry_status"], "valid")
+        self.assertEqual(
+            outside_fields.loc[0, "coordinate_status"], "outside_wkt_bounds"
+        )
+        self.assertEqual(inside_fields.loc[0, "coordinate_status"], "within_wkt_bounds")
+        self.assertEqual(
+            int(outside_fields.loc[0, "utm_epsg"]),
+            int(inside_fields.loc[0, "utm_epsg"]),
+        )
+        self.assertEqual(set(outside_pixels["pixel_id"]), set(inside_pixels["pixel_id"]))
+        self.assertGreater(int(outside_fields.loc[0, "pixel_count"]), 0)
+        self.assertFalse(outside_pixels.empty)
+        self.assertFalse(outside_memberships.empty)
 
 
 class PreprocessingTests(unittest.TestCase):

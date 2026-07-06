@@ -22,8 +22,9 @@ use the LoRA or distillation runtimes.
 
 - Reads
   `/mnt/foundry-az/playground/data/ground_truth/harvard_wkt.parquet`.
-- Validates the required columns, labels, coordinates, WKT geometries, and UTM
-  grid compatibility.
+- Validates the required columns, labels, coordinate ranges, WKT geometries, and
+  UTM grid compatibility. WKT is authoritative; auxiliary coordinate/WKT-bound
+  mismatches are audited rather than rejected.
 - Rasterizes every valid field to globally snapped 10 m pixel centers.
 - Computes each physical pixel once while preserving all field-to-pixel label
   memberships, including overlaps and label conflicts.
@@ -57,7 +58,7 @@ in `run.json` and must remain visible in later analysis.
 
 ## 3. Verification already completed locally
 
-- `pytest`: 79 tests passed.
+- Full repository suite: 178 tests passed; 1 CUDA-only test skipped locally.
 - Ruff lint and format checks passed.
 - Python compilation passed.
 - The published 230 MB MPC encoder loaded successfully with SHA-256:
@@ -239,7 +240,7 @@ The embedding stage is complete only when:
 2. The log has no unresolved traceback.
 3. `embedding_rows` equals
    `4 × field_pixel_membership_count` in `COMPLETED.json`.
-4. Geometry status counts are reviewed.
+4. Geometry and coordinate status counts are reviewed.
 5. Empty-window and per-window S1/S2 observation counts are reviewed before
    downstream modelling.
 
@@ -268,8 +269,8 @@ step. That next scientific step is intentionally not implemented yet.
   bypass the checksum.
 - **`output directory belongs to a different run`:** preserve the old output and
   choose a new `output_dir` in a copied config. Do not mix runs.
-- **Invalid ground-truth field error:** fix the listed ID/WKT/coordinate records;
-  invalid labelled fields are not silently dropped.
+- **Invalid ground-truth field error:** fix the listed unrecoverable WKT or UTM
+  boundary records; invalid labelled fields are not silently dropped.
 - **MPC authorization error:** set `PC_SDK_SUBSCRIPTION_KEY` and rerun.
 - **Transient raster/STAC error:** rerun the exact command; reads are retried and
   completed compatible shards resume.

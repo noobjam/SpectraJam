@@ -16,8 +16,12 @@ Every WKT is rasterized onto a globally snapped 10 m UTM grid using the
 pixel-center rule. TESSERA runs once per physical pixel. A pixel that belongs to
 multiple fields is embedded once and then linked back to each field's `id` and
 `landcover`; embeddings are never spatially averaged before or after the model.
-Missing labels, coordinate/WKT mismatches, invalid polygons, and fields crossing
-a UTM-zone boundary fail the run instead of silently dropping labelled fields.
+WKT is authoritative for rasterization and UTM selection. `LONGITUDE`/`LATITUDE`
+values are range-validated but may be auxiliary reference points; whether they
+fall inside the WKT bounds is recorded as `coordinate_status` in
+`fields.parquet` and summarized in the run manifests. Missing labels,
+unrecoverable WKT, and fields crossing a UTM-zone boundary still fail the run
+instead of silently dropping labelled fields.
 
 ## Fixed temporal contract
 
@@ -101,7 +105,8 @@ The default destination is:
 Artifacts are:
 
 - `run.json`: immutable input, checkpoint, preprocessing, and window identity.
-- `fields.parquet`: original rows/WKT plus geometry audit and pixel count.
+- `fields.parquet`: original rows/WKT plus geometry/coordinate audits and pixel
+  count.
 - `pixels.parquet`: unique 10 m physical pixels and their coordinates.
 - `field_pixels.parquet`: field-to-pixel memberships, overlap counts, and label
   conflicts.

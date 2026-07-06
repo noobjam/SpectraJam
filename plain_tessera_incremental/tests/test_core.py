@@ -4,11 +4,17 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import shapely
 
+from plain_tessera_incremental.catalog import (
+    detached_item_dicts,
+    signed_item_dicts,
+    unsigned_items,
+)
 from plain_tessera_incremental.config import load_config
 from plain_tessera_incremental.geometry import (
     PixelCell,
@@ -23,6 +29,7 @@ from plain_tessera_incremental.inference import (
     day_of_year,
 )
 from plain_tessera_incremental.materialize import (
+    MPCMaterializer,
     PixelTimelines,
     scale_s1_amplitude,
     select_s1_daily_mosaic,
@@ -114,6 +121,84 @@ class GeometryTests(unittest.TestCase):
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_signed_stack_items_do_not_resolve_stac_root_links(self) -> None:
+        import pystac
+
+        raw = {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": "scene",
+            "geometry": {"type": "Point", "coordinates": [3.0, 1.0]},
+            "bbox": [3.0, 1.0, 3.0, 1.0],
+            "properties": {"datetime": "2024-09-01T00:00:00Z"},
+            "links": [
+                {
+                    "rel": "root",
+                    "href": "https://unreachable.invalid/api/stac/v1",
+                }
+            ],
+            "assets": {"B04": {"href": "https://example.invalid/B04.tif"}},
+        }
+
+        def sign_without_network(item):
+            item["assets"]["B04"]["href"] += "?sig=fresh"
+            return item
+
+        with (
+            patch("planetary_computer.sign", side_effect=sign_without_network),
+            patch.object(
+                pystac.Link,
+                "resolve_stac_object",
+                side_effect=AssertionError("STAC root must not be resolved"),
+            ),
+        ):
+            serialized = signed_item_dicts(detached_item_dicts(unsigned_items([raw])))
+
+        self.assertEqual(serialized[0]["id"], "scene")
+        self.assertEqual(serialized[0]["links"][0]["href"], raw["links"][0]["href"])
+        self.assertEqual(
+            serialized[0]["assets"]["B04"]["href"],
+            "https://example.invalid/B04.tif?sig=fresh",
+        )
+
+    def test_raster_retry_resigns_plain_items_without_logging_sas_query(self) -> None:
+        raw = {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": "scene",
+            "geometry": {"type": "Point", "coordinates": [3.0, 1.0]},
+            "bbox": [3.0, 1.0, 3.0, 1.0],
+            "properties": {"datetime": "2024-09-01T00:00:00Z"},
+            "links": [],
+            "assets": {"B04": {"href": "https://example.invalid/B04.tif"}},
+        }
+        materializer = MPCMaterializer(stack_chunksize=1, read_retries=1)
+        secret_error = RuntimeError("https://blob.invalid/a.tif?sig=secret")
+
+        with (
+            patch(
+                "plain_tessera_incremental.materialize.signed_item_dicts",
+                return_value=[raw],
+            ) as signer,
+            patch("plain_tessera_incremental.materialize.time.sleep"),
+            patch("stackstac.stack", side_effect=secret_error) as stack,
+            self.assertLogs("plain_tessera_incremental.materialize", "WARNING") as logs,
+            self.assertRaisesRegex(RuntimeError, "last error type: RuntimeError") as raised,
+        ):
+            materializer._stack(
+                unsigned_items([raw]),
+                ["B04"],
+                RasterWindow(32631, 0, 0, 1, 1, 10),
+                "nearest",
+                rescale=False,
+            )
+
+        self.assertEqual(signer.call_count, 2)
+        self.assertEqual(stack.call_count, 2)
+        self.assertIsInstance(stack.call_args.args[0][0], dict)
+        self.assertNotIn("sig=secret", str(raised.exception))
+        self.assertNotIn("sig=secret", "\n".join(logs.output))
+
     def test_s1_scaled_db_reference_values(self) -> None:
         values = scale_s1_amplitude(np.array([1.0, 0.1, 0.0, np.nan], np.float32))
         np.testing.assert_array_equal(values, np.array([10000, 6000, 0, 0], np.int16))

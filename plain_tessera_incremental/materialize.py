@@ -10,7 +10,13 @@ from typing import Sequence
 
 import numpy as np
 
-from .catalog import S1_ASSETS, S2_ASSETS, signed_items, unsigned_items
+from .catalog import (
+    S1_ASSETS,
+    S2_ASSETS,
+    detached_item_dicts,
+    signed_item_dicts,
+    unsigned_items,
+)
 from .geometry import RasterWindow
 
 
@@ -172,12 +178,12 @@ class MPCMaterializer:
         method = getattr(Resampling, resampling)
         output_dtype = "float64" if rescale else "float32"
         fill_value = np.float64(np.nan) if rescale else np.float32(np.nan)
-        raw_items = [item.to_dict() for item in items]
+        raw_items = detached_item_dicts(list(items))
         last_error: Exception | None = None
         for attempt in range(self.read_retries + 1):
             try:
                 data = stackstac.stack(
-                    signed_items(raw_items),
+                    signed_item_dicts(raw_items),
                     assets=list(assets),
                     epsg=grid.epsg,
                     resolution=(float(grid.resolution_m), float(grid.resolution_m)),
@@ -209,14 +215,17 @@ class MPCMaterializer:
                     break
                 delay = min(2**attempt, 8)
                 LOGGER.warning(
-                    "raster read failed (%d/%d); re-signing and retrying in %ds: %s",
+                    "raster read failed (%d/%d, %s); re-signing and retrying in %ds",
                     attempt + 1,
                     self.read_retries + 1,
+                    type(error).__name__,
                     delay,
-                    error,
                 )
                 time.sleep(delay)
-        raise RuntimeError("MPC raster read failed after retries") from last_error
+        error_type = type(last_error).__name__ if last_error is not None else "unknown"
+        raise RuntimeError(
+            f"MPC raster read failed after retries; last error type: {error_type}"
+        ) from None
 
     @staticmethod
     def _group_s2(items: Sequence[object]) -> dict[date, list[object]]:

@@ -93,7 +93,7 @@ class MPCCatalog:
                 continue
             if any(asset not in item.assets for asset in required):
                 continue
-            records.append((observed, item.id, item.to_dict()))
+            records.append((observed, item.id, item.to_dict(transform_hrefs=False)))
         return [raw for _, _, raw in sorted(records, key=lambda value: (value[0], value[1]))]
 
     def load_or_create_snapshot(
@@ -136,10 +136,15 @@ def unsigned_items(raw_items: list[dict[str, Any]]):
     return [pystac.Item.from_dict(raw) for raw in raw_items]
 
 
-def signed_items(raw_items: list[dict[str, Any]]):
+def detached_item_dicts(items: list[Any]) -> list[dict[str, Any]]:
+    """Serialize items without resolving their STAC root/parent links."""
+    return [item.to_dict(transform_hrefs=False) for item in items]
+
+
+def signed_item_dicts(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Freshly sign plain item mappings without resolving catalog links."""
     try:
         import planetary_computer
     except ImportError as error:
         raise RuntimeError("install plain_tessera_incremental/requirements.txt") from error
-    items = unsigned_items(raw_items)
-    return [planetary_computer.sign(item) for item in items]
+    return [planetary_computer.sign(item) for item in raw_items]

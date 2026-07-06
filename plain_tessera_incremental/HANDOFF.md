@@ -58,7 +58,7 @@ in `run.json` and must remain visible in later analysis.
 
 ## 3. Verification already completed locally
 
-- Full repository suite: 178 tests passed; 1 CUDA-only test skipped locally.
+- Full repository suite: 180 tests passed; 1 CUDA-only test skipped locally.
 - Ruff lint and format checks passed.
 - Python compilation passed.
 - The published 230 MB MPC encoder loaded successfully with SHA-256:
@@ -269,6 +269,9 @@ step. That next scientific step is intentionally not implemented yet.
   bypass the checksum.
 - **`output directory belongs to a different run`:** preserve the old output and
   choose a new `output_dir` in a copied config. Do not mix runs.
+- **Code was updated after a partial run:** code hashes are part of the run
+  fingerprint. Archive/rename the partial output directory and start the updated
+  code with a fresh output directory; do not edit `run.json` to bypass the gate.
 - **Invalid ground-truth field error:** fix the listed unrecoverable WKT or UTM
   boundary records; invalid labelled fields are not silently dropped.
 - **MPC authorization error:** set `PC_SDK_SUBSCRIPTION_KEY` and rerun.

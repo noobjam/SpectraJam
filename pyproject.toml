@@ -32,6 +32,12 @@ train = [
   "numpy>=1.26",
   "torch>=2.3",
 ]
+notebook = [
+  "ipykernel>=6.29",
+  "ipython>=8.20",
+  "jupyterlab>=4.0",
+  "matplotlib>=3.8",
+]
 dev = [
   "pytest>=8.0",
   "ruff>=0.6",

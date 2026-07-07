@@ -131,3 +131,22 @@ Both-modalities-empty prefixes are retained with
 Rerunning the same command resumes from validated Parquet shards and cached
 timelines. A changed parquet, checkpoint, configuration, or preprocessing
 contract is rejected rather than mixed into an existing output directory.
+
+## Inspect partial embeddings
+
+[`notebooks/inspect_partial_embeddings_rgb.ipynb`](notebooks/inspect_partial_embeddings_rgb.ipynb)
+can be run while the job is active. It snapshots atomically published shards,
+validates their run metadata and schema, and streams only their lightweight row
+index to check exact field/window membership against `field_pixels.parquet`.
+It then samples three completed fields, reads only their preview embeddings, and
+plots a common three-channel PCA-RGB projection inside each WKT outline. The RGB
+colors are an embedding diagnostic, not true-color imagery; numerically
+unsupported PCA channels remain neutral.
+
+From the repository root, open it with the notebook environment available on
+the VM:
+
+```bash
+python -m pip install --index-url https://pypi.org/simple -e ".[data,notebook]"
+python -m jupyter lab plain_tessera_incremental/notebooks/inspect_partial_embeddings_rgb.ipynb
+```

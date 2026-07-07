@@ -134,7 +134,7 @@ finish_v2_child() {
   rm -f "$V2_PID_FILE"
   if test "$status" -eq 0; then
     echo "v2 completed successfully during the startup check"
-    echo "output: /mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2"
+    echo "output: $OUTPUT_DIR"
     exit 0
   fi
   echo "ABORT: v2 exited with status $status; last log lines:" >&2
@@ -163,12 +163,23 @@ flock -n 9 || {
   exit 1
 }
 source .venv/bin/activate
+OUTPUT_DIR=$(
+  python -c \
+    'import sys; from plain_tessera_incremental.config import load_config; print(load_config(sys.argv[1]).output_dir)' \
+    "$CONFIG"
+)
 
 echo "Running v2 preflight; the existing job remains untouched if this fails"
 python -u -m plain_tessera_incremental \
   --config "$CONFIG" \
   --preflight-only \
   2>&1 | tee "$PREFLIGHT_LOG"
+
+mkdir -p "$OUTPUT_DIR"
+test -w "$OUTPUT_DIR" || {
+  echo "ABORT: v2 output directory is not writable: $OUTPUT_DIR" >&2
+  exit 1
+}
 
 read -r EXISTING_PID EXISTING_START < <(find_existing_job)
 stop_existing_job "$EXISTING_PID" "$EXISTING_START"
@@ -220,4 +231,4 @@ fi
 
 echo "v2 started as PID $V2_PID"
 echo "log: $V2_LOG"
-echo "output: /mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2"
+echo "output: $OUTPUT_DIR"

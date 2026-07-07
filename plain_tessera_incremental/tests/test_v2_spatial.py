@@ -25,6 +25,7 @@ ROOT = Path(__file__).parents[1]
 def test_v2_defaults_use_separate_output_and_500m_query_halo() -> None:
     config = load_config(ROOT / "config.yaml")
 
+    assert config.output_dir == Path("/mnt/noobjam/harvard_tessera_incremental_v2")
     assert config.output_dir.name == "harvard_tessera_incremental_v2"
     assert config.stac_query_halo_m == 500
     assert config.materialize_workers == 8

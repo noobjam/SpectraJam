@@ -14,8 +14,9 @@ running the real Harvard job on the VM.
   code and operational instructions are both present.
 - A legacy v1 Harvard job was running from commit `a30db0e` and writing to
   `harvard_tessera_incremental`. Preserve that directory as an audit artifact.
-- v2 writes to the separate `harvard_tessera_incremental_v2` directory. Stop
-  the legacy process only after pulling and preflighting the delivered v2 code.
+- v2 writes to the separate `/mnt/noobjam/harvard_tessera_incremental_v2`
+  directory. Stop the legacy process only after pulling and preflighting the
+  delivered v2 code.
 
 ## 2. What is implemented
 
@@ -201,7 +202,7 @@ bash plain_tessera_incremental/cutover_v2.sh && \
 The configured output root is:
 
 ```text
-/mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2
+/mnt/noobjam/harvard_tessera_incremental_v2
 ```
 
 The exact same cutover command is also the resume command. Existing compatible
@@ -210,7 +211,7 @@ STAC snapshots, timeline caches, and validated embedding shards are reused.
 ## 8. Monitoring commands
 
 ```bash
-OUTPUT=/mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2
+OUTPUT=/mnt/noobjam/harvard_tessera_incremental_v2
 
 tail -n 200 logs/plain_tessera_incremental_v2.log
 du -sh "$OUTPUT" 2>/dev/null || true
@@ -240,7 +241,7 @@ The embedding stage is complete only when:
 Quick cardinality check:
 
 ```bash
-python -c 'import json, pathlib; root = pathlib.Path("/mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2"); result = json.loads((root / "COMPLETED.json").read_text()); expected = 4 * result["field_pixel_membership_count"]; assert result["embedding_rows"] == expected, (result["embedding_rows"], expected); print("complete:", result)'
+python -c 'import json, pathlib; root = pathlib.Path("/mnt/noobjam/harvard_tessera_incremental_v2"); result = json.loads((root / "COMPLETED.json").read_text()); expected = 4 * result["field_pixel_membership_count"]; assert result["embedding_rows"] == expected, (result["embedding_rows"], expected); print("complete:", result)'
 ```
 
 After this gate passes, the next work item is to summarize coverage/outcomes by

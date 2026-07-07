@@ -2,7 +2,7 @@ input:
   parquet: /mnt/foundry-az/playground/data/ground_truth/harvard_wkt.parquet
   crs: EPSG:4326
 
-output_dir: /mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2
+output_dir: /mnt/noobjam/harvard_tessera_incremental_v2
 
 columns:
   longitude: LONGITUDE

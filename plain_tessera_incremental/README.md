@@ -128,7 +128,7 @@ environment. The pipeline never logs or persists that key or signed SAS URLs.
 The default destination is:
 
 ```text
-/mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2
+/mnt/noobjam/harvard_tessera_incremental_v2
 ```
 
 Artifacts are:

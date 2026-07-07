@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import dataclass
-from datetime import date
 import logging
-from pathlib import Path
 import re
 import time
-from typing import Sequence
+from collections import defaultdict
+from collections.abc import Sequence
+from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from threading import Lock
 
 import numpy as np
 
@@ -20,11 +22,11 @@ from .catalog import (
 )
 from .geometry import RasterWindow, projected_bounds_to_wgs84
 
-
 S2_BANDS = S2_ASSETS[:-1]
 INVALID_SCL = np.array([0, 1, 2, 3, 8, 9], dtype=np.int16)
 EPOCH = date(1970, 1, 1)
 _URL_QUERY = re.compile(r"(https?://[^?\s'\"<>]+)\?[^\s'\"<>]+")
+_MPC_SIGNING_LOCK = Lock()
 
 
 def _sanitized_error(error: Exception, limit: int = 2000) -> str:
@@ -51,9 +53,8 @@ def _positive_bbox_overlap(
 ) -> bool:
     if first[0] > first[2] or second[0] > second[2]:
         return True
-    return (
-        max(first[0], second[0]) < min(first[2], second[2])
-        and max(first[1], second[1]) < min(first[3], second[3])
+    return max(first[0], second[0]) < min(first[2], second[2]) and max(first[1], second[1]) < min(
+        first[3], second[3]
     )
 
 
@@ -125,9 +126,7 @@ def harmonize_s2_mpc(values: np.ndarray) -> np.ndarray:
     return np.clip(result, 0, np.iinfo(np.uint16).max).astype(np.uint16)
 
 
-def select_s2_daily_mosaic(
-    scl: np.ndarray, bands: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
+def select_s2_daily_mosaic(scl: np.ndarray, bands: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Pick the first valid-SCL item per pixel and all bands from that item."""
     scl = np.asarray(scl)
     bands = np.asarray(bands)
@@ -244,9 +243,17 @@ class PixelTimelines:
 
 
 class MPCMaterializer:
-    def __init__(self, stack_chunksize: int = 256, read_retries: int = 3):
+    def __init__(
+        self,
+        stack_chunksize: int = 256,
+        read_retries: int = 3,
+        group_workers: int = 4,
+    ):
         self.stack_chunksize = stack_chunksize
         self.read_retries = max(0, int(read_retries))
+        self.group_workers = int(group_workers)
+        if self.group_workers < 1:
+            raise ValueError("group_workers must be positive")
 
     def _stack(
         self,
@@ -268,8 +275,13 @@ class MPCMaterializer:
         last_error: Exception | None = None
         for attempt in range(self.read_retries + 1):
             try:
+                # planetary-computer's process-global SAS token cache is not
+                # synchronized. Serialize only signing/cache access; raster
+                # graph construction and reads remain parallel across groups.
+                with _MPC_SIGNING_LOCK:
+                    signed_items = signed_item_dicts(raw_items)
                 data = stackstac.stack(
-                    signed_item_dicts(raw_items),
+                    signed_items,
                     assets=list(assets),
                     epsg=grid.epsg,
                     resolution=(float(grid.resolution_m), float(grid.resolution_m)),
@@ -280,9 +292,7 @@ class MPCMaterializer:
                     dtype=output_dtype,
                     fill_value=fill_value,
                 )
-                actual_assets = tuple(
-                    str(value) for value in data.coords["band"].values.tolist()
-                )
+                actual_assets = tuple(str(value) for value in data.coords["band"].values.tolist())
                 if not actual_assets or data.sizes.get("time", 0) == 0:
                     raise NoSpatialCoverageError(
                         "stackstac found no requested assets over the tight raster window"
@@ -298,7 +308,12 @@ class MPCMaterializer:
                         f"{data.sizes['y']}x{data.sizes['x']} != "
                         f"{grid.height}x{grid.width}"
                     )
-                return data.transpose("time", "band", "y", "x").compute().values
+                # Date/orbit groups are already parallelized by the bounded outer
+                # pool. Keep each Dask graph synchronous to avoid an unbounded
+                # nested thread pool multiplying remote COG requests.
+                return (
+                    data.transpose("time", "band", "y", "x").compute(scheduler="synchronous").values
+                )
             except NoSpatialCoverageError:
                 raise
             except Exception as error:
@@ -318,8 +333,7 @@ class MPCMaterializer:
         error_type = type(last_error).__name__ if last_error is not None else "unknown"
         error_message = _sanitized_error(last_error) if last_error is not None else "unknown"
         raise RuntimeError(
-            "MPC raster read failed after retries; "
-            f"last error type: {error_type}: {error_message}"
+            f"MPC raster read failed after retries; last error type: {error_type}: {error_message}"
         ) from None
 
     @staticmethod
@@ -341,6 +355,29 @@ class MPCMaterializer:
                 groups[(item.datetime.date(), orbit)].append(item)
         return dict(sorted(groups.items()))
 
+    @staticmethod
+    def _ordered_results(
+        futures: Sequence[Future[tuple[np.ndarray, np.ndarray] | None]],
+        executor: ThreadPoolExecutor,
+    ) -> list[tuple[np.ndarray, np.ndarray] | None]:
+        done, _ = wait(futures, return_when=FIRST_EXCEPTION)
+        failed = any(future.exception() is not None for future in done)
+        if failed:
+            for future in futures:
+                future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            error = next(
+                future.exception()
+                for future in futures
+                if not future.cancelled() and future.exception() is not None
+            )
+            raise RuntimeError(
+                "parallel raster materialization failed "
+                f"({type(error).__name__}): {_sanitized_error(error)}"
+            ) from None
+        executor.shutdown(wait=True)
+        return [future.result() for future in futures]
+
     def materialize(
         self,
         raw_s2_items: list[dict[str, object]],
@@ -355,43 +392,88 @@ class MPCMaterializer:
         s2_items = unsigned_items(raw_s2_items)
         s1_items = unsigned_items(raw_s1_items)
         grid_bounds_wgs84 = projected_bounds_to_wgs84(grid.bounds, grid.epsg)
-        s2_values: list[np.ndarray] = []
-        s2_valid: list[np.ndarray] = []
-        s2_days: list[int] = []
-        for observed, items in self._group_s2(s2_items).items():
+
+        def process_s2_group(
+            items: Sequence[object],
+        ) -> tuple[np.ndarray, np.ndarray] | None:
             items = _items_intersecting_grid(items, S2_ASSETS, grid, grid_bounds_wgs84)
             if not items:
-                continue
+                return None
             try:
                 scl = self._stack(items, ["SCL"], grid, "nearest", rescale=False)
                 bands = self._stack(items, S2_BANDS, grid, "bilinear", rescale=False)
             except NoSpatialCoverageError:
-                continue
-            values, valid = select_s2_daily_mosaic(
+                return None
+            return select_s2_daily_mosaic(
                 scl[:, 0, rows, columns],
                 bands[:, :, rows, columns],
             )
-            s2_values.append(values)
-            s2_valid.append(valid)
-            s2_days.append(epoch_day(observed))
 
+        def process_s1_group(
+            items: Sequence[object],
+        ) -> tuple[np.ndarray, np.ndarray] | None:
+            items = _items_intersecting_grid(items, S1_ASSETS, grid, grid_bounds_wgs84)
+            if not items:
+                return None
+            try:
+                bands = self._stack(items, S1_ASSETS, grid, "nearest", rescale=True)
+            except NoSpatialCoverageError:
+                return None
+            return select_s1_daily_mosaic(bands[:, :, rows, columns])
+
+        s2_groups = list(self._group_s2(s2_items).items())
+        s1_groups = list(self._group_s1(s1_items).items())
+        group_count = len(s2_groups) + len(s1_groups)
+        ordered_groups: list[tuple[str, date, str | None]] = []
+        results: list[tuple[np.ndarray, np.ndarray] | None] = []
+        if group_count:
+            worker_count = min(self.group_workers, group_count)
+            LOGGER.info(
+                "materializing %d S2 date groups and %d S1 date/orbit groups with %d workers",
+                len(s2_groups),
+                len(s1_groups),
+                worker_count,
+            )
+            executor = ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="tessera-raster",
+            )
+            futures: list[Future[tuple[np.ndarray, np.ndarray] | None]] = []
+            try:
+                for index in range(max(len(s2_groups), len(s1_groups))):
+                    if index < len(s2_groups):
+                        observed, items = s2_groups[index]
+                        ordered_groups.append(("s2", observed, None))
+                        futures.append(executor.submit(process_s2_group, items))
+                    if index < len(s1_groups):
+                        (observed, orbit), items = s1_groups[index]
+                        ordered_groups.append(("s1", observed, orbit))
+                        futures.append(executor.submit(process_s1_group, items))
+                results = self._ordered_results(futures, executor)
+            except BaseException:
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+
+        s2_values: list[np.ndarray] = []
+        s2_valid: list[np.ndarray] = []
+        s2_days: list[int] = []
         s1_by_orbit: dict[str, tuple[list[np.ndarray], list[np.ndarray], list[int]]] = {
             "ascending": ([], [], []),
             "descending": ([], [], []),
         }
-        for (observed, orbit), items in self._group_s1(s1_items).items():
-            items = _items_intersecting_grid(items, S1_ASSETS, grid, grid_bounds_wgs84)
-            if not items:
+        for (modality, observed, orbit), result in zip(ordered_groups, results, strict=True):
+            if result is None:
                 continue
-            try:
-                bands = self._stack(items, S1_ASSETS, grid, "nearest", rescale=True)
-            except NoSpatialCoverageError:
-                continue
-            values, valid = select_s1_daily_mosaic(bands[:, :, rows, columns])
-            value_list, valid_list, day_list = s1_by_orbit[orbit]
-            value_list.append(values)
-            valid_list.append(valid)
-            day_list.append(epoch_day(observed))
+            values, valid = result
+            if modality == "s2":
+                s2_values.append(values)
+                s2_valid.append(valid)
+                s2_days.append(epoch_day(observed))
+            else:
+                value_list, valid_list, day_list = s1_by_orbit[str(orbit)]
+                value_list.append(values)
+                valid_list.append(valid)
+                day_list.append(epoch_day(observed))
 
         pixels = len(pixel_ids)
 
@@ -403,7 +485,9 @@ class MPCMaterializer:
             )
 
         def stack_valid(values: list[np.ndarray]) -> np.ndarray:
-            return np.stack(values).astype(bool, copy=False) if values else np.empty((0, pixels), bool)
+            return (
+                np.stack(values).astype(bool, copy=False) if values else np.empty((0, pixels), bool)
+            )
 
         ascending = s1_by_orbit["ascending"]
         descending = s1_by_orbit["descending"]

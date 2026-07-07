@@ -1,6 +1,6 @@
 # Plain TESSERA incremental pipeline — handoff
 
-Last updated: 2026-07-06
+Last updated: 2026-07-07
 
 This is the operational checkpoint for continuing development locally and
 running the real Harvard job on the VM.
@@ -12,8 +12,10 @@ running the real Harvard job on the VM.
   together on `main` under `plain_tessera_incremental/`.
 - If this file is visible after pulling `origin/main` on the VM, the pipeline
   code and operational instructions are both present.
-- The full Harvard embedding job has not been started. No Harvard output is
-  expected yet.
+- A legacy v1 Harvard job was running from commit `a30db0e` and writing to
+  `harvard_tessera_incremental`. Preserve that directory as an audit artifact.
+- v2 writes to the separate `harvard_tessera_incremental_v2` directory. Stop
+  the legacy process only after pulling and preflighting the delivered v2 code.
 
 ## 2. What is implemented
 
@@ -25,7 +27,12 @@ use the LoRA or distillation runtimes.
 - Validates the required columns, labels, coordinate ranges, WKT geometries, and
   UTM grid compatibility. WKT is authoritative; auxiliary coordinate/WKT-bound
   mismatches are audited rather than rejected.
-- Rasterizes every valid field to globally snapped 10 m pixel centers.
+- Rasterizes every valid field to a globally snapped 10 m grid and assigns its
+  label only to cells whose center is inside or on the WKT boundary. Cell
+  footprints may extend outside the WKT.
+- Records projected WKT area/dimensions and both center-selected and
+  positive-area-overlap cell counts so sparse small fields are auditable; the
+  positive-area count is diagnostic and does not create label memberships.
 - Computes each physical pixel once while preserving all field-to-pixel label
   memberships, including overlaps and label conflicts.
 - Queries Microsoft Planetary Computer STAC for:
@@ -33,6 +40,10 @@ use the LoRA or distillation runtimes.
   - `sentinel-1-rtc`
 - Applies the pinned TESSERA v1.1 MPC preprocessing contract for S2, SCL, and
   ascending/descending S1.
+- Adds a local 500 m projected catalog-discovery halo without dilating WKT
+  labels; this is a local robustness measure, not part of the pinned upstream
+  preprocessing contract. S2 dates plus S1 date/orbit groups are materialized
+  with eight bounded workers.
 - Loads the frozen plain encoder from
   `checkpoints/tessera_v1_1_mpc_encoder.pt`.
 - Produces four cumulative, half-open prefixes:
@@ -58,9 +69,9 @@ in `run.json` and must remain visible in later analysis.
 
 ## 3. Verification already completed locally
 
-- Full repository suite: 183 tests passed; 1 CUDA-only test skipped locally.
-- Ruff lint and format checks passed.
-- Python compilation passed.
+- Full repository suite: 196 tests passed; 1 CUDA-only test skipped locally.
+- `git diff --check`, notebook JSON/code parsing, and Python compilation passed.
+- Ruff was not installed in the final local verification environment.
 - The published 230 MB MPC encoder loaded successfully with SHA-256:
 
   ```text
@@ -104,45 +115,42 @@ Expected result:
 
 ## 5. Next step B — pull and prepare the VM
 
-Replace `/path/to/SpectraJam` with the actual clone location:
-
 ```bash
-cd /path/to/SpectraJam
+cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
 git switch main
 git pull --ff-only origin main
 git log -1 --oneline
 ```
 
-Activate the VM environment. Create it only if it does not already exist:
+Activate the VM environment and verify its existing PyTorch/CUDA build before
+installing anything. The running v1 job proves the current environment already
+has the runtime dependencies, and v2 adds no new package dependency.
 
 ```bash
-cd /path/to/SpectraJam
+cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
 
 test -d .venv || python3 -m venv .venv
 source .venv/bin/activate
-
-python -m pip install --upgrade pip
-python -m pip install -e ".[data,train,dev]"
-python -m pip install -r plain_tessera_incremental/requirements.txt
+python -c 'import torch; print("torch:", torch.__version__); print("cuda available:", torch.cuda.is_available()); print("gpu:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none")'
 ```
 
-If the VM uses a specially installed CUDA build of PyTorch, confirm it before
-launching and do not replace it with a CPU-only build:
+Only when rebuilding the environment, install the non-PyTorch dependencies from
+public PyPI. Omitting the `train` extra prevents pip from replacing the VM's
+known-good CUDA build; provision PyTorch separately from the matching CUDA index
+if the check above fails.
 
 ```bash
-python - <<'PY'
-import torch
-print("torch:", torch.__version__)
-print("cuda available:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("gpu:", torch.cuda.get_device_name(0))
-PY
+PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL= \
+  python -m pip install --index-url https://pypi.org/simple -e ".[data,dev]"
+PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL= \
+  python -m pip install --index-url https://pypi.org/simple \
+  -r plain_tessera_incremental/requirements.txt
 ```
 
 ## 6. Next step C — verify input and checkpoint on the VM
 
 ```bash
-cd /path/to/SpectraJam
+cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
 source .venv/bin/activate
 
 test -r /mnt/foundry-az/playground/data/ground_truth/harvard_wkt.parquet
@@ -159,7 +167,8 @@ If the checkpoint is missing, download the official encoder first:
 
 ```bash
 mkdir -p checkpoints
-python -m pip install gdown
+PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL= \
+  python -m pip install --index-url https://pypi.org/simple gdown
 python -m gdown 1t-gfTxi3Hg_uJXpJ9etROCRgKt2myfJ2 \
   -O checkpoints/tessera_v1_1_mpc_encoder.pt
 
@@ -174,52 +183,36 @@ printing or committing it:
 export PC_SDK_SUBSCRIPTION_KEY="..."
 ```
 
-## 7. Next step D — preflight before spending compute
+## 7. Next step D — checked cutover to resumable v2
+
+The checked cutover script runs v2 preflight first. If preflight fails, it does
+not touch the existing job. After a successful preflight it scans `/proc`,
+requires exact Python argv, repository cwd, executable type, and PID start-time
+identity, stops at most one matching process, waits for it to exit, and launches
+v2. The stale legacy PID file is intentionally ignored. The old output directory
+is not deleted or reused.
 
 ```bash
-cd /path/to/SpectraJam
-source .venv/bin/activate
-mkdir -p logs
-
-python -u -m plain_tessera_incremental \
-  --config plain_tessera_incremental/config.yaml \
-  --preflight-only \
-  2>&1 | tee logs/plain_tessera_preflight.log
-```
-
-Do not launch the full job unless preflight reports the expected parquet,
-checkpoint SHA-256, four windows, and the intended resolved device.
-
-## 8. Next step E — launch the resumable VM job
-
-```bash
-cd /path/to/SpectraJam
-source .venv/bin/activate
-mkdir -p logs
-
-nohup env PYTHONUNBUFFERED=1 python -u -m plain_tessera_incremental \
-  --config plain_tessera_incremental/config.yaml \
-  > logs/plain_tessera_incremental.log 2>&1 &
-
-echo $! | tee logs/plain_tessera_incremental.pid
-tail -f logs/plain_tessera_incremental.log
+cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
+bash plain_tessera_incremental/cutover_v2.sh && \
+  tail -f logs/plain_tessera_incremental_v2.log
 ```
 
 The configured output root is:
 
 ```text
-/mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental
+/mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2
 ```
 
-The exact same launch command is the resume command. Existing compatible STAC
-snapshots, timeline caches, and validated embedding shards are reused.
+The exact same cutover command is also the resume command. Existing compatible
+STAC snapshots, timeline caches, and validated embedding shards are reused.
 
-## 9. Monitoring commands
+## 8. Monitoring commands
 
 ```bash
-OUTPUT=/mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental
+OUTPUT=/mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2
 
-tail -n 200 logs/plain_tessera_incremental.log
+tail -n 200 logs/plain_tessera_incremental_v2.log
 du -sh "$OUTPUT" 2>/dev/null || true
 find "$OUTPUT/embeddings" -name '*.parquet' 2>/dev/null | wc -l
 
@@ -229,10 +222,10 @@ test -f "$OUTPUT/COMPLETED.json" && cat "$OUTPUT/COMPLETED.json"
 If a PID file exists:
 
 ```bash
-ps -fp "$(cat logs/plain_tessera_incremental.pid)"
+ps -fp "$(cat logs/plain_tessera_incremental_v2.pid)"
 ```
 
-## 10. Completion gate before the next scientific step
+## 9. Completion gate before the next scientific step
 
 The embedding stage is complete only when:
 
@@ -247,23 +240,14 @@ The embedding stage is complete only when:
 Quick cardinality check:
 
 ```bash
-python - <<'PY'
-import json
-from pathlib import Path
-
-root = Path("/mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental")
-result = json.loads((root / "COMPLETED.json").read_text())
-expected = 4 * result["field_pixel_membership_count"]
-assert result["embedding_rows"] == expected, (result["embedding_rows"], expected)
-print("complete:", result)
-PY
+python -c 'import json, pathlib; root = pathlib.Path("/mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2"); result = json.loads((root / "COMPLETED.json").read_text()); expected = 4 * result["field_pixel_membership_count"]; assert result["embedding_rows"] == expected, (result["embedding_rows"], expected); print("complete:", result)'
 ```
 
 After this gate passes, the next work item is to summarize coverage/outcomes by
 window and land-cover label, then agree on the downstream field-level modelling
 step. That next scientific step is intentionally not implemented yet.
 
-## 11. Common failure handling
+## 10. Common failure handling
 
 - **Checkpoint SHA mismatch:** stop and provision the exact MPC encoder; do not
   bypass the checksum.

@@ -20,9 +20,11 @@ from .geometry import (
     RasterWindow,
     WorkTileKey,
     canonical_geometry_sha256,
+    expand_projected_bounds,
     parse_field_geometry,
     pixel_cells_for_geometry,
     pixel_centers_wgs84,
+    positive_area_pixel_count,
     project_geometry,
     projected_bounds_to_wgs84,
     raster_chunk_for_pixel,
@@ -139,6 +141,10 @@ def prepare_field_pixels(
         geometry_hash = canonical_sha256({"unparsed_wkt": _text(raw_wkt)})
         epsg: int | None = None
         cells: tuple[PixelCell, ...] = ()
+        area_m2: float | None = None
+        bbox_width_m: float | None = None
+        bbox_height_m: float | None = None
+        positive_area_count: int | None = None
         try:
             geometry, geometry_status = parse_field_geometry(raw_wkt)
             status = geometry_status
@@ -162,7 +168,16 @@ def prepare_field_pixels(
             if corner_epsgs != {epsg}:
                 raise ValueError("field crosses a UTM zone or hemisphere boundary")
             projected = project_geometry(geometry, epsg)
+            projected_min_x, projected_min_y, projected_max_x, projected_max_y = (
+                projected.bounds
+            )
+            area_m2 = float(projected.area)
+            bbox_width_m = float(projected_max_x - projected_min_x)
+            bbox_height_m = float(projected_max_y - projected_min_y)
             cells = pixel_cells_for_geometry(projected, epsg, config.pixel_size_m)
+            positive_area_count = positive_area_pixel_count(
+                projected, config.pixel_size_m
+            )
             if not cells:
                 status = "zero_pixel_centers"
                 reason = "no snapped 10 m pixel center is covered by the field"
@@ -196,6 +211,11 @@ def prepare_field_pixels(
                 "geometry_reason": reason,
                 "coordinate_status": coordinate_status,
                 "utm_epsg": epsg,
+                "area_m2": area_m2,
+                "bbox_width_m": bbox_width_m,
+                "bbox_height_m": bbox_height_m,
+                "center_pixel_count": len(cells),
+                "positive_area_pixel_count": positive_area_count,
                 "pixel_count": len(cells),
                 "duplicate_ordinal": duplicate_ordinal,
                 "source_row_number": row_number,
@@ -379,6 +399,10 @@ def preflight(config: PipelineConfig) -> dict[str, Any]:
         "checkpoint_sha256": checkpoint_sha256,
         "output_dir": str(config.output_dir),
         "runtime": runtime,
+        "acquisition": {
+            "stac_query_halo_m": config.stac_query_halo_m,
+            "materialize_workers": config.materialize_workers,
+        },
         "windows": [
             {
                 "id": window.window_id,
@@ -526,7 +550,11 @@ def run_pipeline(config: PipelineConfig) -> dict[str, Any]:
         config.s1_collection,
         config.stac_request_retries,
     )
-    materializer = MPCMaterializer(config.stack_chunksize, config.stac_request_retries)
+    materializer = MPCMaterializer(
+        config.stack_chunksize,
+        config.stac_request_retries,
+        config.materialize_workers,
+    )
     group_columns = [
         "utm_epsg",
         "work_x_index",
@@ -571,7 +599,10 @@ def run_pipeline(config: PipelineConfig) -> dict[str, Any]:
         rows = np.asarray([value[0] for value in local], dtype=np.int64)
         columns = np.asarray([value[1] for value in local], dtype=np.int64)
         work = WorkTileKey(epsg, work_x, work_y)
-        bbox = projected_bounds_to_wgs84(work_tile_bounds(work, config.work_tile_m), epsg)
+        query_bounds = expand_projected_bounds(
+            work_tile_bounds(work, config.work_tile_m), config.stac_query_halo_m
+        )
+        bbox = projected_bounds_to_wgs84(query_bounds, epsg)
         snapshot_path = config.output_dir / "stac" / f"{work.key}.json"
         snapshot = catalog.load_or_create_snapshot(
             snapshot_path,

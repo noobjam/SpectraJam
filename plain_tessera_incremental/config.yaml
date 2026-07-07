@@ -2,7 +2,7 @@ input:
   parquet: /mnt/foundry-az/playground/data/ground_truth/harvard_wkt.parquet
   crs: EPSG:4326
 
-output_dir: /mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental
+output_dir: /mnt/foundry-az/playground/data/ground_truth/harvard_tessera_incremental_v2
 
 columns:
   longitude: LONGITUDE
@@ -32,8 +32,10 @@ stac:
     s2: sentinel-2-l2a
     s1: sentinel-1-rtc
   request_retries: 3
+  query_halo_m: 500
 
 runtime:
   device: auto
   batch_size: 256
   stack_chunksize: 256
+  materialize_workers: 8

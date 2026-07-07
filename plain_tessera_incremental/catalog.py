@@ -26,6 +26,18 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _split_antimeridian_bbox(
+    bbox_wgs84: tuple[float, float, float, float],
+) -> tuple[tuple[float, float, float, float], ...]:
+    left, bottom, right, top = bbox_wgs84
+    if left <= right:
+        return (bbox_wgs84,)
+    return (
+        (left, bottom, 180.0, top),
+        (-180.0, bottom, right, top),
+    )
+
+
 class MPCCatalog:
     """Unsigned, immutable STAC discovery; assets are signed only when read."""
 
@@ -71,30 +83,42 @@ class MPCCatalog:
     ) -> list[dict[str, Any]]:
         if modality not in self.collections:
             raise ValueError(f"unknown modality: {modality}")
-        end_inclusive = datetime.combine(end_exclusive, datetime.min.time(), tzinfo=UTC) - timedelta(
-            microseconds=1
-        )
+        end_time = datetime.combine(end_exclusive, datetime.min.time(), tzinfo=UTC)
+        end_inclusive = end_time - timedelta(microseconds=1)
         start_time = datetime.combine(start, datetime.min.time(), tzinfo=UTC)
-        search = self._open().search(
-            collections=[self.collections[modality]],
-            bbox=bbox_wgs84,
-            datetime=f"{start_time.isoformat()}/{end_inclusive.isoformat()}",
-            max_items=None,
-        )
         required = S2_ASSETS if modality == "s2" else S1_ASSETS
-        records: list[tuple[datetime, str, dict[str, Any]]] = []
-        for item in search.items():
-            if item.datetime is None:
-                continue
-            observed = item.datetime.astimezone(UTC)
-            if not start_time <= observed < datetime.combine(
-                end_exclusive, datetime.min.time(), tzinfo=UTC
-            ):
-                continue
-            if any(asset not in item.assets for asset in required):
-                continue
-            records.append((observed, item.id, item.to_dict(transform_hrefs=False)))
-        return [raw for _, _, raw in sorted(records, key=lambda value: (value[0], value[1]))]
+        records_by_id: dict[str, tuple[datetime, bytes, dict[str, Any]]] = {}
+        for search_bbox in _split_antimeridian_bbox(bbox_wgs84):
+            search = self._open().search(
+                collections=[self.collections[modality]],
+                bbox=search_bbox,
+                datetime=f"{start_time.isoformat()}/{end_inclusive.isoformat()}",
+                max_items=None,
+            )
+            for item in search.items():
+                if item.datetime is None:
+                    continue
+                observed = item.datetime.astimezone(UTC)
+                if not start_time <= observed < end_time:
+                    continue
+                if any(asset not in item.assets for asset in required):
+                    continue
+                raw = item.to_dict(transform_hrefs=False)
+                candidate = (observed, _canonical_json(raw), raw)
+                existing = records_by_id.get(item.id)
+                if existing is None:
+                    records_by_id[item.id] = candidate
+                elif candidate[:2] != existing[:2]:
+                    raise RuntimeError(
+                        "STAC returned conflicting documents for duplicate item ID "
+                        f"{item.id!r} across an antimeridian-split query"
+                    )
+        return [
+            raw
+            for item_id, (observed, _, raw) in sorted(
+                records_by_id.items(), key=lambda value: (value[1][0], value[0])
+            )
+        ]
 
     def load_or_create_snapshot(
         self,

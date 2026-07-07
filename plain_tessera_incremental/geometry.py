@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
+from heapq import merge
+from itertools import groupby
 from typing import Iterable
 
 import numpy as np
@@ -233,6 +235,131 @@ def pixel_cells_for_geometry(
     return tuple(sorted(selected, key=lambda cell: (cell.y_index, cell.x_index)))
 
 
+def positive_area_pixel_count(
+    projected_geometry: BaseGeometry,
+    resolution_m: int = 10,
+    block_pixels: int = 256,
+) -> int:
+    """Count grid cells whose footprint overlaps the geometry with positive area."""
+    if resolution_m <= 0:
+        raise ValueError("resolution_m must be positive")
+    if block_pixels < 1:
+        raise ValueError("block_pixels must be positive")
+    parts = _polygon_parts(projected_geometry)
+    if not parts:
+        return 0
+
+    polygonal_geometry = (
+        projected_geometry
+        if projected_geometry.geom_type in {"Polygon", "MultiPolygon"}
+        else shapely.union_all(parts)
+    )
+
+    def candidate_blocks(part: BaseGeometry):
+        min_x, min_y, max_x, max_y = part.bounds
+        x_start = math.floor(min_x / resolution_m)
+        x_stop = math.ceil(max_x / resolution_m)
+        y_start = math.floor(min_y / resolution_m)
+        y_stop = math.ceil(max_y / resolution_m)
+        if x_stop <= x_start or y_stop <= y_start:
+            return
+        for y_block in range(
+            y_start // block_pixels,
+            (y_stop - 1) // block_pixels + 1,
+        ):
+            block_bottom = y_block * block_pixels
+            local_y_start = max(y_start, block_bottom) - block_bottom
+            local_y_stop = min(y_stop, block_bottom + block_pixels) - block_bottom
+            for x_block in range(
+                x_start // block_pixels,
+                (x_stop - 1) // block_pixels + 1,
+            ):
+                block_left = x_block * block_pixels
+                local_x_start = max(x_start, block_left) - block_left
+                local_x_stop = min(x_stop, block_left + block_pixels) - block_left
+                yield (
+                    y_block,
+                    x_block,
+                    local_y_start,
+                    local_y_stop,
+                    local_x_start,
+                    local_x_stop,
+                )
+
+    shapely.prepare(polygonal_geometry)
+    leaf_cell_limit = min(block_pixels * block_pixels, 1024)
+
+    def count_rectangle(x_start: int, x_stop: int, y_start: int, y_stop: int) -> int:
+        left = x_start * resolution_m
+        right = x_stop * resolution_m
+        bottom = y_start * resolution_m
+        top = y_stop * resolution_m
+        footprint = shapely.Polygon(
+            ((left, bottom), (right, bottom), (right, top), (left, top))
+        )
+        if shapely.covers(polygonal_geometry, footprint):
+            return (x_stop - x_start) * (y_stop - y_start)
+        if not shapely.intersects(polygonal_geometry, footprint):
+            return 0
+
+        width = x_stop - x_start
+        height = y_stop - y_start
+        if width * height > leaf_cell_limit:
+            if width >= height and width > 1:
+                middle = x_start + width // 2
+                return count_rectangle(
+                    x_start, middle, y_start, y_stop
+                ) + count_rectangle(middle, x_stop, y_start, y_stop)
+            middle = y_start + height // 2
+            return count_rectangle(x_start, x_stop, y_start, middle) + count_rectangle(
+                x_start, x_stop, middle, y_stop
+            )
+
+        x_indices = np.arange(x_start, x_stop, dtype=np.float64)
+        y_indices = np.arange(y_start, y_stop, dtype=np.float64)
+        lefts = x_indices * resolution_m
+        bottoms = y_indices * resolution_m
+        cells = shapely.box(
+            lefts[None, :],
+            bottoms[:, None],
+            lefts[None, :] + resolution_m,
+            bottoms[:, None] + resolution_m,
+        )
+        intersects = shapely.intersects(polygonal_geometry, cells)
+        intersecting_cells = cells[intersects]
+        if not intersecting_cells.size:
+            return 0
+        # For polygonal inputs, non-touching intersections have overlapping
+        # interiors and therefore strictly positive intersection area.
+        return int(
+            intersecting_cells.size
+            - np.count_nonzero(shapely.touches(polygonal_geometry, intersecting_cells))
+        )
+
+    count = 0
+    streams = (candidate_blocks(part) for part in parts)
+    blocks = groupby(merge(*streams), key=lambda candidate: candidate[:2])
+    for (y_block, x_block), candidates in blocks:
+        local_y_start = block_pixels
+        local_y_stop = 0
+        local_x_start = block_pixels
+        local_x_stop = 0
+        for _, _, y_start, y_stop, x_start, x_stop in candidates:
+            local_y_start = min(local_y_start, y_start)
+            local_y_stop = max(local_y_stop, y_stop)
+            local_x_start = min(local_x_start, x_start)
+            local_x_stop = max(local_x_stop, x_stop)
+        block_bottom = y_block * block_pixels
+        block_left = x_block * block_pixels
+        count += count_rectangle(
+            block_left + local_x_start,
+            block_left + local_x_stop,
+            block_bottom + local_y_start,
+            block_bottom + local_y_stop,
+        )
+    return count
+
+
 def work_tile_for_pixel(pixel: PixelCell, work_tile_m: int) -> WorkTileKey:
     cells = work_tile_m // pixel.resolution_m
     return WorkTileKey(pixel.epsg, pixel.x_index // cells, pixel.y_index // cells)
@@ -254,6 +381,18 @@ def work_tile_bounds(
     left = key.x_index * work_tile_m
     bottom = key.y_index * work_tile_m
     return left, bottom, left + work_tile_m, bottom + work_tile_m
+
+
+def expand_projected_bounds(
+    bounds: tuple[float, float, float, float], halo_m: float
+) -> tuple[float, float, float, float]:
+    """Expand projected query bounds without changing a field geometry."""
+    if not math.isfinite(halo_m) or halo_m < 0:
+        raise ValueError("halo_m must be finite and non-negative")
+    left, bottom, right, top = bounds
+    if not all(math.isfinite(value) for value in bounds) or right < left or top < bottom:
+        raise ValueError("projected bounds are invalid")
+    return left - halo_m, bottom - halo_m, right + halo_m, top + halo_m
 
 
 def projected_bounds_to_wgs84(

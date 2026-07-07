@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,9 @@ class PipelineConfig:
     s2_collection: str
     s1_collection: str
     stac_request_retries: int
+    stac_query_halo_m: float
     stack_chunksize: int
+    materialize_workers: int
     batch_size: int
     device: str
     wkt_column: str
@@ -66,8 +69,17 @@ class PipelineConfig:
             "sentinel-1-rtc",
         ):
             raise ValueError("the MPC checkpoint requires MPC S2 L2A and S1 RTC collections")
-        if self.stac_request_retries < 0 or self.stack_chunksize < 1 or self.batch_size < 1:
-            raise ValueError("retry, stack chunk, and model batch settings are invalid")
+        if not math.isfinite(self.stac_query_halo_m) or self.stac_query_halo_m < 0:
+            raise ValueError("stac query_halo_m must be finite and non-negative")
+        if (
+            self.stac_request_retries < 0
+            or self.stack_chunksize < 1
+            or not 1 <= self.materialize_workers <= 64
+            or self.batch_size < 1
+        ):
+            raise ValueError(
+                "retry, stack chunk, materialize worker, and model batch settings are invalid"
+            )
         if self.device not in {"auto", "cpu", "cuda"}:
             raise ValueError("device must be auto, cpu, or cuda")
         if self.checkpoint_sha256 is not None:
@@ -113,7 +125,9 @@ def load_config(path: str | Path) -> PipelineConfig:
         s2_collection=str(stac["collections"]["s2"]),
         s1_collection=str(stac["collections"]["s1"]),
         stac_request_retries=int(stac.get("request_retries", 3)),
+        stac_query_halo_m=float(stac.get("query_halo_m", 500)),
         stack_chunksize=int(runtime.get("stack_chunksize", 256)),
+        materialize_workers=int(runtime.get("materialize_workers", 8)),
         batch_size=int(runtime.get("batch_size", 256)),
         device=str(runtime.get("device", "auto")),
         wkt_column=str(columns.get("wkt", "wkt")),

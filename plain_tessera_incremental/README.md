@@ -147,6 +147,7 @@ From the repository root, open it with the notebook environment available on
 the VM:
 
 ```bash
-python -m pip install --index-url https://pypi.org/simple -e ".[data,notebook]"
+PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL= \
+  python -m pip install --index-url https://pypi.org/simple -e ".[data,notebook]"
 python -m jupyter lab plain_tessera_incremental/notebooks/inspect_partial_embeddings_rgb.ipynb
 ```

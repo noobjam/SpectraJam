@@ -209,24 +209,54 @@ python -m jupyter lab plain_tessera_incremental/notebooks/completed_field_pixels
 
 Edit `TARGET_WINDOW` in the configuration cell to inspect `w1`, `w2`, or `w3`.
 
-## Intercropping embedding-affinity fingerprint
+## Intercropping 128-D signature admixture
 
 [`notebooks/intercropping_embedding_dna.ipynb`](notebooks/intercropping_embedding_dna.ipynb)
-compares `Bean and Maize` and `Irish Potato and Maize` pixels with field-balanced
-monocrop references for Maize, Bean, Irish Potato, and Rice. It validates the
-reference model out of sample with fixed 5 km spatial blocks and a strict
-field-count, block-count, recall, Wilson-bound, and permutation gate. Each
-mixture cohort then searches every eligible clean monocrop field for its
-geographically matched pools (up to 12 nearest fields per crop), reports match
-distances and pixel- and field-level fingerprints, and uses joint whole-field
-bootstrap intervals that refit the references.
+fits each intercropped pixel's raw 128-D TESSERA embedding as a nonnegative
+convex mixture of field-balanced Maize, Bean, Irish Potato, and Rice reference
+signatures. It reports both an unrestricted four-crop simplex decomposition and
+a Bean–Maize or Irish-Potato–Maize segment decomposition, together with
+named-parent mass, off-target mass, segment clipping, and a monocrop-control
+residual percentile. This is the DNA-style source attribution; the named-pair
+percentage is explicitly a no-call when the unrestricted fit does not support
+it.
 
-The separately computed, non-compositional affinity scores are unitless
-representation similarities and do not sum to one. They are not estimates of
-crop cover, plant count, biomass, yield, or physical mixture percentage. The
-overall reference gate additionally requires `COMPLETED.json`; partial pipeline
-output and failed spatial validation are visibly watermarked and restricted to
-descriptive use.
+Intercropping detection is separate from decomposition. At field level the
+notebook computes
+`4 * w_parent_a * w_parent_b / (w_parent_a + w_parent_b)`, which is zero at a
+pure-parent endpoint and largest for a high-mass, balanced two-parent signature.
+Its threshold is the empirical 95th percentile of all monocrop control fields,
+using the higher interpolation rule. Detection also requires at least 20
+independent null fields, sufficient
+named-parent mass, acceptable field residuals, and stable prototype geometry.
+Failed checks propagate to the tables and figures as `NO-CALL`; they are not
+silently converted into percentages.
+
+Field percentages, the field detection score, and their bootstrap intervals
+all aggregate the same raw set of exact field pixels and then apply one
+field-level quality gate. Pixel-level fit masks are used only in the diagnostic
+pixel maps, avoiding a mismatch between displayed shares and uncertainty.
+
+The notebook freezes the same clean 10 m pixels and geographically matched
+monocrop field IDs through `w1`–`w4`. One affine metric is fitted on monocrop
+references pooled over `w1`–`w3`, while field-balanced prototypes are fitted per
+window. Validation refits the metric and prototypes by 5 km grid block when the
+data support it; an in-sample fallback is shown only as a diagnostic and forces
+`NO-CALL`. Fold residuals are divided by their own equal-crop/equal-field
+reference radius before comparison. A 200-resample reference-field bootstrap
+adds field and cohort uncertainty intervals.
+
+Visuals include all 128 dimensions, monocrop recovery matrices, unrestricted
+four-way field bars, true 1x1 grid-cell field maps with WKT outlines, same-pixel
+heatmaps, longitudinal field trajectories, pixel-spread whiskers, distinct 95%
+reference-field bootstrap intervals, and parent-separation diagnostics.
+
+Weights are embedding-signature shares that sum to one inside the fitted model;
+they are not calibrated crop-cover, plant-count, biomass, yield, or planted-area
+fractions. Spatially insufficient controls are forced to no-call. Until
+`COMPLETED.json` exists, every result remains visibly marked as a partial,
+descriptive geographic snapshot; `w4` remains an out-of-contract sensitivity
+window.
 
 ```bash
 python -m jupyter lab plain_tessera_incremental/notebooks/intercropping_embedding_dna.ipynb

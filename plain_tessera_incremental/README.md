@@ -179,3 +179,30 @@ PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL= \
   python -m pip install --index-url https://pypi.org/simple -e ".[data,notebook]"
 python -m jupyter lab plain_tessera_incremental/notebooks/inspect_partial_embeddings_rgb.ipynb
 ```
+
+## Inspect completed field pixels and crop separation
+
+[`notebooks/completed_field_pixels_crop_separation.ipynb`](notebooks/completed_field_pixels_crop_separation.ipynb)
+also runs safely against the active partial output. It defaults to `w4`, finds
+only fields whose complete expected pixel membership is already published, and
+keeps every selected 10 m pixel embedding as its own sample. It plots actual
+cell footprints against each field WKT beside those same pixels in PCA space;
+it does not average a field into one vector.
+
+The crop-separation section uses field-grouped cross-validation. Geometry/base
+duplicates and every field participating in a physical pixel overlap are
+excluded, and train/test field, pixel, and row identifiers are asserted
+disjoint. The notebook reports field-balanced pixel metrics, a field-level
+mean-distance score, and a field-label permutation test. These are exploratory
+diagnostics for the currently completed fields, not final independent-test
+accuracy. The default folds separate fields but are not coarse spatial blocks;
+use a blocked geographic evaluation before interpreting the score as crop
+generalization.
+
+From the repository root:
+
+```bash
+python -m jupyter lab plain_tessera_incremental/notebooks/completed_field_pixels_crop_separation.ipynb
+```
+
+Edit `TARGET_WINDOW` in the configuration cell to inspect `w1`, `w2`, or `w3`.

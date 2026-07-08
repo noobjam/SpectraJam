@@ -189,15 +189,17 @@ keeps every selected 10 m pixel embedding as its own sample. It plots actual
 cell footprints against each field WKT beside those same pixels in PCA space;
 it does not average a field into one vector.
 
-The crop-separation section uses field-grouped cross-validation. Geometry/base
-duplicates and every field participating in a physical pixel overlap are
-excluded, and train/test field, pixel, and row identifiers are asserted
-disjoint. The notebook reports field-balanced pixel metrics, a field-level
-mean-distance score, and a field-label permutation test. These are exploratory
-diagnostics for the currently completed fields, not final independent-test
-accuracy. The default folds separate fields but are not coarse spatial blocks;
-use a blocked geographic evaluation before interpreting the score as crop
-generalization.
+The crop-separation section uses field-grouped cross-validation. Shared pixel
+rows are excluded without discarding each field's private pixels. Identical
+geometries with one label retain one canonical field, while conflicting-label
+geometry duplicates and every pixel they touch are excluded. Train/test field,
+pixel, and row identifiers are asserted disjoint. The notebook reports
+field-balanced pixel metrics, a field-level mean-distance score, and a
+field-label permutation test. These are
+exploratory diagnostics for the currently completed fields, not final
+independent-test accuracy. The default folds separate fields but are not coarse
+spatial blocks; use a blocked geographic evaluation before interpreting the
+score as crop generalization.
 
 From the repository root:
 

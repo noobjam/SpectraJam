@@ -208,3 +208,44 @@ python -m jupyter lab plain_tessera_incremental/notebooks/completed_field_pixels
 ```
 
 Edit `TARGET_WINDOW` in the configuration cell to inspect `w1`, `w2`, or `w3`.
+
+## Intercropping embedding-affinity fingerprint
+
+[`notebooks/intercropping_embedding_dna.ipynb`](notebooks/intercropping_embedding_dna.ipynb)
+compares `Bean and Maize` and `Irish Potato and Maize` pixels with field-balanced
+monocrop references for Maize, Bean, Irish Potato, and Rice. It validates the
+reference model out of sample with fixed 5 km spatial blocks and a strict
+field-count, block-count, recall, Wilson-bound, and permutation gate. Each
+mixture cohort then searches every eligible clean monocrop field for its
+geographically matched pools (up to 12 nearest fields per crop), reports match
+distances and pixel- and field-level fingerprints, and uses joint whole-field
+bootstrap intervals that refit the references.
+
+The separately computed, non-compositional affinity scores are unitless
+representation similarities and do not sum to one. They are not estimates of
+crop cover, plant count, biomass, yield, or physical mixture percentage. The
+overall reference gate additionally requires `COMPLETED.json`; partial pipeline
+output and failed spatial validation are visibly watermarked and restricted to
+descriptive use.
+
+```bash
+python -m jupyter lab plain_tessera_incremental/notebooks/intercropping_embedding_dna.ipynb
+```
+
+## Incremental embedding evolution
+
+[`notebooks/incremental_window_embedding_evolution.ipynb`](notebooks/incremental_window_embedding_evolution.ipynb)
+matches the same clean physical pixels across `w1`–`w4`. It uses one
+field-balanced PCA basis fitted on `w1`–`w3`, projects `w4` out of sample, draws
+individual pixel trajectories, and measures full-128-D cosine drift, path
+length, tortuosity, direction coherence, parent-direction similarity, and
+S1/S2 observation/input-count increments.
+
+The prefixes are cumulative and are recomputed by bidirectional TESSERA, so a
+window-to-window difference is representation drift rather than an embedding
+of only the newly added dates. `w4` remains an out-of-contract 487-day
+sensitivity experiment.
+
+```bash
+python -m jupyter lab plain_tessera_incremental/notebooks/incremental_window_embedding_evolution.ipynb
+```

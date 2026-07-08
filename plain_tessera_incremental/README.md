@@ -209,63 +209,89 @@ python -m jupyter lab plain_tessera_incremental/notebooks/completed_field_pixels
 
 Edit `TARGET_WINDOW` in the configuration cell to inspect `w1`, `w2`, or `w3`.
 
-## Intercropping 128-D signature admixture
+## Intercropping parentage likelihood and signature attribution
 
-[`notebooks/intercropping_embedding_dna.ipynb`](notebooks/intercropping_embedding_dna.ipynb)
-fits each intercropped pixel's raw 128-D TESSERA embedding as a nonnegative
-convex mixture of field-balanced Maize, Bean, Irish Potato, and Rice reference
-signatures. It reports both an unrestricted four-crop simplex decomposition and
-a Bean–Maize or Irish-Potato–Maize segment decomposition, together with
-named-parent mass, off-target mass, segment clipping, and a monocrop-control
-residual percentile. This is the DNA-style source attribution; the named-pair
-percentage and its uncertainty are always shown as raw descriptive results.
+[`notebooks/intercropping_parentage_likelihood.ipynb`](notebooks/intercropping_parentage_likelihood.ipynb)
+is the primary DNA-inspired analysis. It keeps two questions separate:
 
-Intercropping detection is separate from decomposition. At field level the
-notebook computes
-`4 * w_parent_a * w_parent_b / (w_parent_a + w_parent_b)`, which is zero at a
-pure-parent endpoint and largest for a high-mass, balanced two-parent signature.
-Its threshold is the empirical 95th percentile of all monocrop control fields,
-using the higher interpolation rule. Detection also requires at least 20
-independent null fields, sufficient named-parent mass, acceptable field
-residuals, and stable prototype geometry. Failed checks prevent a validated
-detection claim but do not erase the decomposition or replace it with `NaN`.
+1. whether Bean–Maize or Irish-Potato–Maize explains a field better than either
+   pure endpoint or another crop pair; and
+2. conditional on that model, the fitted balance of parent-A-like and
+   parent-B-like pixel signatures.
 
-Field percentages, the field detection score, and their bootstrap intervals
-all aggregate the same raw set of exact field pixels and then apply one
-field-level quality gate. Pixel-level fit masks are used only in the diagnostic
-pixel maps, avoiding a mismatch between displayed shares and uncertainty.
+The model uses all 128 embedding dimensions jointly with a field-balanced,
+shrunken covariance. Covariance shrinkage and probability temperature are
+selected with complete-field held-out folds. Pure-parent held-out fields define
+the empirical mixture-evidence threshold, and synthetic mosaics made from
+held-out pure-field pixels validate the estimator's arithmetic. Synthetic
+mosaics do not validate physical crop abundance. Monocrop field labels provide
+weak supervision for their pixels; intercropping labels are never treated as
+per-pixel ground truth. No 5 km grid filters, subsamples, or enters the
+likelihood calculation; the reported validation is held-out-field validation,
+not a claim of geographic generalization.
 
-The notebook uses every unique clean field for the six requested labels and
-freezes the same exact 10 m pixels through `w1`–`w4`. There is no 12-reference
-or 48-mixture-field cap; geographic distances are diagnostics only. One affine
-metric is fitted on all monocrop references pooled over `w1`–`w3`, while
-field-balanced prototypes are fitted per window. Validation refits the metric
-and prototypes by 5 km grid block when the data support it; an in-sample
-fallback prevents a validated detection but still leaves the raw decomposition
-visible. The 5 km cells only group nearby field centroids into validation folds;
-they are not buffers, STAC query limits, pixel filters, or final-model
-subsamples. Fold residuals are divided by their own equal-crop/equal-field
-reference radius before comparison. A 200-resample reference-field bootstrap
-adds field uncertainty intervals; cohort intervals additionally resample the
-mixture fields. The conditional parent-A share is undefined only when the two
-named-parent weights sum to zero, while the four raw crop weights remain
-available.
+Pixel output retains calibrated probabilities for all four monocrop references,
+named-parent mass, conditional parent probability, covariance-aware parent-axis
+position, overlap flags, and label-conflict flags. Field output reports a
+mosaic maximum-likelihood share, 20 m spatial-block bootstrap interval,
+pair-versus-pure evidence, pair-versus-alternative margin, empirical null-tail
+rate, other-known-crop mass, held-out reference-distance adequacy, and an
+explicit call status. One-pixel fields remain visible but cannot establish a
+two-contributor spatial mosaic. A field far from all four monocrop reference
+distributions is `OUT_OF_MODEL`; normalized crop probabilities alone are not
+mistaken for model adequacy. The null-tail rate is a held-out-reference
+diagnostic, not a formal exchangeable p-value, because field pixels are
+spatially dependent and the final scoring model uses all references.
 
-Visuals include all 128 dimensions, monocrop recovery matrices, unrestricted
-four-way field bars, true 1x1 grid-cell field maps with WKT outlines, same-pixel
-heatmaps, longitudinal field trajectories, pixel-spread whiskers, distinct 95%
-reference-field bootstrap intervals, and parent-separation diagnostics.
+Every canonical geometry+label field that is fully published in all four
+windows is scored on the exact same complete physical pixels through
+`w1`–`w4`. Exact same-label WKT replicas are never counted as independent
+reference evidence; instead, every original `field_uid` maps to the canonical
+physical result in `source_field_scores.parquet` and `field_plot_index.parquet`.
+Conflicting-label geometries remain explicit no-calls. The notebook displays a
+few deterministic examples but saves one four-window dashboard for every
+physical field complete in `w1`–`w4`. Each dashboard shows actual 10 m cells and
+WKT, pixel parent evidence, field balance and uncertainty, evidence versus the
+pure-parent threshold, all-crop mass, and the best alternative pair.
 
-Weights are embedding-signature shares that sum to one inside the fitted model;
-they are not calibrated crop-cover, plant-count, biomass, yield, or planted-area
-fractions. Spatially insufficient controls mark validated detection as
-unavailable while preserving raw weights. Until `COMPLETED.json` exists, every
-result remains visibly marked as a partial, descriptive geographic snapshot;
-`w4` remains an out-of-contract sensitivity window.
+Exports are written beneath:
+
+```text
+/mnt/noobjam/harvard_tessera_incremental_v2/analysis/
+  intercropping_parentage_likelihood_v1/
+    <run-fingerprint>/<pipeline-snapshot-id>/<analysis-config-code-id>/
+```
+
+The snapshot contains partitioned all-pixel Parquet, physical and all-source
+field tables, reference/synthetic controls, validation metrics, saved model
+parameters, a complete field-report gallery, SHA-256 plot manifest, and a
+`COMPLETED.json` marker written last. `w1`–`w4` evidence is never multiplied
+because the windows are cumulative and dependent. `w4` remains an
+out-of-contract 487-day sensitivity window.
+
+From the repository root on the VM:
 
 ```bash
-python -m jupyter lab plain_tessera_incremental/notebooks/intercropping_embedding_dna.ipynb
+cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
+source .venv/bin/activate
+
+PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL= \
+  python -m pip install --index-url https://pypi.org/simple -e ".[data,notebook]"
+
+python -m jupyter lab \
+  plain_tessera_incremental/notebooks/intercropping_parentage_likelihood.ipynb
 ```
+
+`TESSERA_OUTPUT_DIR` and `TESSERA_DNA_EXPORT_DIR` override the default input and
+export roots. `TESSERA_DNA_REPORT_LIMIT=N` is available only for a deliberate
+smoke run; it writes `SMOKE_COMPLETE.json`, not `COMPLETED.json`. Leave it unset
+(or `0`) to save every complete physical-field report and finalize the gallery.
+
+The older
+[`notebooks/intercropping_embedding_dna.ipynb`](notebooks/intercropping_embedding_dna.ipynb)
+is retained as a legacy prototype-centroid projection diagnostic. Its simplex
+weights are not the parentage-likelihood result and should not be used as the
+primary intercropping answer.
 
 ## Incremental embedding evolution
 

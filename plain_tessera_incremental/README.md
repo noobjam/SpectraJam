@@ -307,7 +307,7 @@ analysis directory.
 
 ## Harvard-only multi-lens workbench
 
-[`notebooks/intercropping_harvard_multilens.ipynb`](notebooks/intercropping_harvard_multilens.ipynb)
+[`notebooks/intercropping_harvard_only_workbench.ipynb`](notebooks/intercropping_harvard_only_workbench.ipynb)
 is the recommended next analysis before adding another field dataset. It uses
 only the frozen Harvard v2 field artifacts and the daily Sentinel-1/Sentinel-2
 arrays already retained in their task caches. It performs no STAC requests,
@@ -336,25 +336,27 @@ are threshold-free primary metrics. Recall and false-positive rate use a
 separate inner spatial calibration fold, and the calibration model is not
 refitted before outer testing.
 
-For a first execution, use **Kernel → Restart Kernel and Run All Cells**. The
-first executable cell resolves the snapshot-specific analysis directory, and
-the final handoff cell reloads its saved Parquet dependencies, so it can be
-rerun safely after a kernel restart without relying on stale in-memory state.
+The notebook follows the same structure as the earlier working notebooks. One
+hidden setup cell contains every import, loader, model, plotting function, and
+export helper. The visible cells pass explicit `data_bundle`, `feature_bundle`,
+and `results` objects through the workflow; there are no project imports or
+external notebook-state variables. Execute it from top to bottom with **Run All
+Cells**.
 
 ```bash
 cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
 source .venv/bin/activate
 
 python -m jupyter lab \
-  plain_tessera_incremental/notebooks/intercropping_harvard_multilens.ipynb
+  plain_tessera_incremental/notebooks/intercropping_harvard_only_workbench.ipynb
 ```
 
 Exports are snapshot-specific beneath
-`/mnt/noobjam/harvard_tessera_incremental_v2/analysis/intercropping_harvard_multilens_v1/`.
+`/mnt/noobjam/harvard_tessera_incremental_v2/analysis/intercropping_harvard_only_workbench_v1/`.
 They include the canonical field/pixel audit, cache provenance, field features,
 spatial folds, every held-out prediction, performance and paired-lens deltas,
 resolution sensitivity, a falsification scorecard, seven figures, and one
-`HARVARD_MULTILENS_HANDOFF_BEGIN ... HARVARD_MULTILENS_HANDOFF_END` JSON block.
+`HARVARD_WORKBENCH_HANDOFF_BEGIN ... HARVARD_WORKBENCH_HANDOFF_END` JSON block.
 
 ## Progressive intercropping separability
 

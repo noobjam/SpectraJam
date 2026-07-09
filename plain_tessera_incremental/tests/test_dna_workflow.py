@@ -36,6 +36,7 @@ def test_presentation_notebooks_are_standalone() -> None:
         "intercropping_temporal_separability.ipynb",
         "intercropping_parent_evidence_v2.ipynb",
         "intercropping_harvard_multilens.ipynb",
+        "intercropping_harvard_only_workbench.ipynb",
     )
     for notebook_name in notebook_names:
         notebook = json.loads((notebook_dir / notebook_name).read_text())
@@ -92,6 +93,22 @@ def test_presentation_notebooks_are_standalone() -> None:
     assert "not_spatially_testable" in harvard_multilens_source
     assert "raw_full_retrospective" in harvard_multilens_source
     assert "No result estimates crop fraction" in harvard_multilens_source
+
+    harvard_workbench_source = (
+        notebook_dir / "intercropping_harvard_only_workbench.ipynb"
+    ).read_text()
+    for figure_number in range(1, 8):
+        assert f"0{figure_number}_" in harvard_workbench_source
+    assert "HARVARD_WORKBENCH_HANDOFF_BEGIN" in harvard_workbench_source
+    assert "HARVARD_WORKBENCH_HANDOFF_END" in harvard_workbench_source
+    assert "data_bundle = load_harvard_data()" in harvard_workbench_source
+    assert (
+        "feature_bundle = build_harvard_features(data_bundle)"
+        in harvard_workbench_source
+    )
+    assert "results = run_harvard_evaluation(feature_bundle)" in harvard_workbench_source
+    assert "ANALYSIS_DIR" not in harvard_workbench_source
+    assert "load_handoff_exports" not in harvard_workbench_source
 
 
 def test_harvard_multilens_handoff_recovers_after_kernel_restart(
@@ -183,6 +200,33 @@ def test_harvard_multilens_handoff_recovers_after_kernel_restart(
     assert completion["status"] == "complete"
     assert completion["figure_count"] == 7
     assert (analysis_dir / "HARVARD_MULTILENS_HANDOFF.json").is_file()
+
+
+def test_harvard_workbench_hidden_setup_defines_complete_api() -> None:
+    notebook_path = (
+        Path(__file__).parents[1]
+        / "notebooks"
+        / "intercropping_harvard_only_workbench.ipynb"
+    )
+    notebook = json.loads(notebook_path.read_text())
+    setup_source = "".join(notebook["cells"][1]["source"])
+    namespace: dict[str, object] = {}
+    exec(compile(setup_source, str(notebook_path), "exec"), namespace)
+
+    required_api = {
+        "load_harvard_data",
+        "build_harvard_features",
+        "run_harvard_evaluation",
+        "figure_cohort_support",
+        "figure_geography",
+        "figure_multilens_performance",
+        "figure_crop_presence",
+        "figure_resolution",
+        "figure_phenology",
+        "figure_falsification",
+        "finalize_harvard_workbench",
+    }
+    assert required_api <= namespace.keys()
 
 
 def _fixture(root: Path) -> tuple[Path, int]:

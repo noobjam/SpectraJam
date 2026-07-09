@@ -35,6 +35,7 @@ def test_presentation_notebooks_are_standalone() -> None:
         "intercropping_pdf_evidence_pack.ipynb",
         "intercropping_temporal_separability.ipynb",
         "intercropping_parent_evidence_v2.ipynb",
+        "intercropping_harvard_multilens.ipynb",
     )
     for notebook_name in notebook_names:
         notebook = json.loads((notebook_dir / notebook_name).read_text())
@@ -78,6 +79,19 @@ def test_presentation_notebooks_are_standalone() -> None:
     assert "mixture_fields_in_parent_fit" in parent_evidence_source
     assert "TARGET_TRAIN_FPR" in parent_evidence_source
     assert "hybrid_parent_evidence" in parent_evidence_source
+
+    harvard_multilens_source = (
+        notebook_dir / "intercropping_harvard_multilens.ipynb"
+    ).read_text()
+    for figure_number in range(1, 8):
+        assert f"0{figure_number}_" in harvard_multilens_source
+    assert "HARVARD_MULTILENS_HANDOFF_BEGIN" in harvard_multilens_source
+    assert "HARVARD_MULTILENS_HANDOFF_END" in harvard_multilens_source
+    assert 'SAFE_END = pd.Timestamp(\\"2025-05-06\\")' in harvard_multilens_source
+    assert "StratifiedGroupKFold" in harvard_multilens_source
+    assert "not_spatially_testable" in harvard_multilens_source
+    assert "raw_full_retrospective" in harvard_multilens_source
+    assert "No result estimates crop fraction" in harvard_multilens_source
 
 
 def _fixture(root: Path) -> tuple[Path, int]:

@@ -305,10 +305,56 @@ cohort-median evidence rather than maximum evidence. Set
 `TESSERA_DNA_ANALYSIS_DIR` only when you need to point it at a specific completed
 analysis directory.
 
+## Harvard-only multi-lens workbench
+
+[`notebooks/intercropping_harvard_multilens.ipynb`](notebooks/intercropping_harvard_multilens.ipynb)
+is the recommended next analysis before adding another field dataset. It uses
+only the frozen Harvard v2 field artifacts and the daily Sentinel-1/Sentinel-2
+arrays already retained in their task caches. It performs no STAC requests,
+downloads, or new TESSERA inference. The existing `w2` embeddings appear only
+as one frozen comparison lens.
+
+The notebook is designed to break out of the single “seasonal DNA” framing. It
+tests seven competing lenses: location, field geometry/acquisition opportunity,
+their combined nuisance baseline, raw pre-survey Season B observations, raw
+observations plus context, a post-survey retrospective sensitivity, and frozen
+TESSERA. It evaluates generic sole-versus-intercrop detection, both crop-pair
+mixture tasks, and separate maize, bean, potato, and rice presence heads. It
+also audits exact-label geography, 10 m pixel support, footprint coverage, and
+whether crop presence is easier than mixture identity.
+
+Because the reduced parquet omits per-field planting date, visit date, crop
+stage, management, and photographs, `[2025-03-01, 2025-05-06)` is treated as a
+common pre-survey Season B interval rather than a reconstructed field clock.
+`[2025-05-06, 2025-07-01)` is sensitivity-only and is never presented as a
+deployable result. All conclusions remain exploratory.
+
+Validation uses stratified 5 km spatial blocks with no random-field fallback.
+If a rare target cannot place both classes in spatially disjoint train and test
+sets, it is reported as `not_spatially_testable`. AUROC and average precision
+are threshold-free primary metrics. Recall and false-positive rate use a
+separate inner spatial calibration fold, and the calibration model is not
+refitted before outer testing.
+
+```bash
+cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
+source .venv/bin/activate
+
+python -m jupyter lab \
+  plain_tessera_incremental/notebooks/intercropping_harvard_multilens.ipynb
+```
+
+Exports are snapshot-specific beneath
+`/mnt/noobjam/harvard_tessera_incremental_v2/analysis/intercropping_harvard_multilens_v1/`.
+They include the canonical field/pixel audit, cache provenance, field features,
+spatial folds, every held-out prediction, performance and paired-lens deltas,
+resolution sensitivity, a falsification scorecard, seven figures, and one
+`HARVARD_MULTILENS_HANDOFF_BEGIN ... HARVARD_MULTILENS_HANDOFF_END` JSON block.
+
 ## Progressive intercropping separability
 
 [`notebooks/intercropping_parent_evidence_v2.ipynb`](notebooks/intercropping_parent_evidence_v2.ipynb)
-is the current primary intercropping experiment. It learns each parent axis from
+is the earlier parent-evidence experiment. It learns each parent axis from
 field-balanced monocrop pixels only, cross-fits pixel parent evidence, aggregates
 distributional, temporal, and within-field spatial features, and evaluates a
 binary `intercrop vs monocrop` detector on untouched physical fields. The

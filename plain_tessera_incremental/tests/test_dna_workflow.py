@@ -29,32 +29,40 @@ from plain_tessera_incremental.storage import (
 from plain_tessera_incremental.windows import PrefixWindow
 
 
-def test_pdf_evidence_pack_notebook_is_standalone() -> None:
-    notebook_path = (
-        Path(__file__).parents[1]
-        / "notebooks"
-        / "intercropping_pdf_evidence_pack.ipynb"
+def test_presentation_notebooks_are_standalone() -> None:
+    notebook_dir = Path(__file__).parents[1] / "notebooks"
+    notebook_names = (
+        "intercropping_pdf_evidence_pack.ipynb",
+        "intercropping_temporal_separability.ipynb",
     )
-    notebook = json.loads(notebook_path.read_text())
-    code = "\n".join(
-        "".join(cell["source"])
-        for cell in notebook["cells"]
-        if cell["cell_type"] == "code"
-    )
-    tree = ast.parse(code)
-    project_imports = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            project_imports.extend(
-                alias.name
-                for alias in node.names
-                if alias.name.startswith("plain_tessera_incremental")
-            )
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if module.startswith("plain_tessera_incremental"):
-                project_imports.append(module)
-    assert project_imports == []
+    for notebook_name in notebook_names:
+        notebook = json.loads((notebook_dir / notebook_name).read_text())
+        code = "\n".join(
+            "".join(cell["source"])
+            for cell in notebook["cells"]
+            if cell["cell_type"] == "code"
+        )
+        tree = ast.parse(code)
+        project_imports = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                project_imports.extend(
+                    alias.name
+                    for alias in node.names
+                    if alias.name.startswith("plain_tessera_incremental")
+                )
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module.startswith("plain_tessera_incremental"):
+                    project_imports.append(module)
+        assert project_imports == []
+        assert sum(len(cell.get("outputs", [])) for cell in notebook["cells"]) == 0
+
+    temporal_source = (
+        notebook_dir / "intercropping_temporal_separability.ipynb"
+    ).read_text()
+    for figure_number in range(1, 8):
+        assert f"0{figure_number}_" in temporal_source
 
 
 def _fixture(root: Path) -> tuple[Path, int]:

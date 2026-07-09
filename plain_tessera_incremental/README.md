@@ -305,6 +305,45 @@ cohort-median evidence rather than maximum evidence. Set
 `TESSERA_DNA_ANALYSIS_DIR` only when you need to point it at a specific completed
 analysis directory.
 
+## Progressive intercropping separability
+
+[`notebooks/intercropping_temporal_separability.ipynb`](notebooks/intercropping_temporal_separability.ipynb)
+is the primary test of whether progressive TESSERA embeddings distinguish each
+intercropping label from both corresponding monocrops. It does not assume that
+an intercrop must be a linear parent mixture. The two held-out three-class tasks
+are Bean versus Maize versus Bean-and-Maize, and Irish Potato versus Maize
+versus Irish-Potato-and-Maize.
+
+The notebook uses every scoreable canonical physical field and the same exact
+private 10 m pixels through all four windows. It compares `w1`, `w1+w2`, and
+`w1+w2+w3`; `w4` is reported only as an out-of-contract sensitivity analysis.
+Regularization is selected inside each training fold. Pixel predictions use the
+same held-out-field folds and are visual explanations, never independent test
+samples. The result supports field generalization within the frozen snapshot,
+not geographic transfer to a new region.
+
+The notebook is standalone and reads the existing embedding shards directly.
+It performs no STAC requests and no TESSERA inference. It displays and saves
+seven 200 dpi figures covering cohort design, progressive field performance,
+confusion matrices, intercropping-probability trajectories, field embedding
+space, within-field heterogeneity, and representative out-of-fold pixel maps.
+
+```bash
+cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
+source .venv/bin/activate
+
+PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL= \
+  python -m pip install --index-url https://pypi.org/simple -e ".[data,notebook]"
+
+python -m jupyter lab \
+  plain_tessera_incremental/notebooks/intercropping_temporal_separability.ipynb
+```
+
+Exports are snapshot-specific beneath
+`/mnt/noobjam/harvard_tessera_incremental_v2/analysis/intercropping_temporal_separability_v1/`.
+The analysis tests embedding separability and spatial-temporal signature, not
+biomass, planted-area fraction, plant count, or yield.
+
 The older
 [`notebooks/intercropping_embedding_dna.ipynb`](notebooks/intercropping_embedding_dna.ipynb)
 is retained as a legacy prototype-centroid projection diagnostic. Its simplex

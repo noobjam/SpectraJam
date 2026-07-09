@@ -94,6 +94,97 @@ def test_presentation_notebooks_are_standalone() -> None:
     assert "No result estimates crop fraction" in harvard_multilens_source
 
 
+def test_harvard_multilens_handoff_recovers_after_kernel_restart(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    notebook_path = (
+        Path(__file__).parents[1]
+        / "notebooks"
+        / "intercropping_harvard_multilens.ipynb"
+    )
+    notebook = json.loads(notebook_path.read_text())
+    output = tmp_path / "pipeline"
+    output.mkdir()
+    fingerprint = "a" * 64
+    write_json_atomic(output / "run.json", {"run_fingerprint": fingerprint})
+    write_json_atomic(output / "COMPLETED.json", {"status": "complete"})
+    for filename in ("fields.parquet", "pixels.parquet", "field_pixels.parquet"):
+        pd.DataFrame({"placeholder": [1]}).to_parquet(output / filename, index=False)
+
+    analysis_root = tmp_path / "analysis"
+    analysis_dir = analysis_root / fingerprint[:16]
+    figure_dir = analysis_dir / "figures"
+    figure_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "field_uid": ["field-1"],
+            "spatial_block": ["block-1"],
+            "landcover": ["Maize"],
+        }
+    ).to_parquet(analysis_dir / "field_features.parquet", index=False)
+    pd.DataFrame(
+        {"field_uid": ["field-1"], "pixel_id": ["pixel-1"]}
+    ).to_parquet(analysis_dir / "field_pixel_index.parquet", index=False)
+    pd.DataFrame(
+        {
+            "field_uid": ["field-1"],
+            "task": ["generic_intercrop"],
+            "lens": ["raw_safe"],
+        }
+    ).to_parquet(analysis_dir / "field_predictions.parquet", index=False)
+    pd.DataFrame(
+        {
+            "task": ["generic_intercrop"],
+            "lens": ["raw_safe"],
+            "n": [1],
+            "positive_n": [0],
+            "auroc": [np.nan],
+            "auroc_ci_low": [np.nan],
+            "auroc_ci_high": [np.nan],
+            "average_precision": [np.nan],
+            "ap_lift": [np.nan],
+            "recall": [np.nan],
+            "false_positive_rate": [np.nan],
+        }
+    ).to_parquet(analysis_dir / "performance.parquet", index=False)
+    pd.DataFrame({"task": ["generic_intercrop"], "delta": [0.0]}).to_parquet(
+        analysis_dir / "paired_lens_deltas.parquet", index=False
+    )
+    pd.DataFrame({"hypothesis": ["fixture"], "flag": [False]}).to_parquet(
+        analysis_dir / "hypothesis_scorecard.parquet", index=False
+    )
+    pd.DataFrame({"criterion": ["fixture"], "passed": [False]}).to_parquet(
+        analysis_dir / "bean_maize_exploratory_gates.parquet", index=False
+    )
+    for filename in (
+        "cohort_attrition.parquet",
+        "cache_task_audit.parquet",
+        "spatial_fold_assignments.parquet",
+        "evaluation_audit.parquet",
+        "resolution_sensitivity.parquet",
+    ):
+        pd.DataFrame({"placeholder": [1]}).to_parquet(
+            analysis_dir / filename, index=False
+        )
+    for figure_number in range(1, 8):
+        (figure_dir / f"0{figure_number}_fixture.png").write_bytes(b"fixture")
+
+    monkeypatch.setenv("TESSERA_OUTPUT_DIR", str(output))
+    monkeypatch.setenv("HARVARD_MULTILENS_EXPORT_DIR", str(analysis_root))
+    namespace: dict[str, object] = {}
+    setup_source = "".join(notebook["cells"][1]["source"])
+    handoff_source = "".join(notebook["cells"][23]["source"])
+    exec(compile(setup_source, str(notebook_path), "exec"), namespace)
+    assert namespace["ANALYSIS_DIR"] == analysis_dir
+    exec(compile(handoff_source, str(notebook_path), "exec"), namespace)
+
+    completion = json.loads((analysis_dir / "COMPLETED.json").read_text())
+    assert completion["status"] == "complete"
+    assert completion["figure_count"] == 7
+    assert (analysis_dir / "HARVARD_MULTILENS_HANDOFF.json").is_file()
+
+
 def _fixture(root: Path) -> tuple[Path, int]:
     output = root / "pipeline"
     fingerprint = "f" * 64

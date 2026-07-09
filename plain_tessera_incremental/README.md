@@ -336,6 +336,11 @@ are threshold-free primary metrics. Recall and false-positive rate use a
 separate inner spatial calibration fold, and the calibration model is not
 refitted before outer testing.
 
+For a first execution, use **Kernel → Restart Kernel and Run All Cells**. The
+first executable cell resolves the snapshot-specific analysis directory, and
+the final handoff cell reloads its saved Parquet dependencies, so it can be
+rerun safely after a kernel restart without relying on stale in-memory state.
+
 ```bash
 cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
 source .venv/bin/activate

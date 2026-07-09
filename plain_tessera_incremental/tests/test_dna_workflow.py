@@ -63,6 +63,9 @@ def test_presentation_notebooks_are_standalone() -> None:
     ).read_text()
     for figure_number in range(1, 8):
         assert f"0{figure_number}_" in temporal_source
+    assert "PDF_HANDOFF_BEGIN" in temporal_source
+    assert "PDF_HANDOFF_END" in temporal_source
+    assert "PDF_HANDOFF.json" in temporal_source
 
 
 def _fixture(root: Path) -> tuple[Path, int]:

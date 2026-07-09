@@ -327,6 +327,11 @@ It performs no STAC requests and no TESSERA inference. It displays and saves
 seven 200 dpi figures covering cohort design, progressive field performance,
 confusion matrices, intercropping-probability trajectories, field embedding
 space, within-field heterogeneity, and representative out-of-fold pixel maps.
+Its final cell also prints one compact `PDF_HANDOFF_BEGIN ... PDF_HANDOFF_END`
+block containing the facts and plot-ready values for all seven figures. Copying
+that single block is sufficient for a separate machine to evaluate the run and
+rebuild the presentation; no image or Parquet transfer is required. The same
+payload is saved as `PDF_HANDOFF.json` beside the figures.
 
 ```bash
 cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam

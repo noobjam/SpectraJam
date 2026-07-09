@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import replace
 from datetime import date
+import json
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shapely
@@ -19,15 +20,6 @@ from plain_tessera_incremental.notebooks._dna_workflow import (
     save_workflow_tables,
 )
 from plain_tessera_incremental.notebooks._dna_reporting import save_all_field_reports
-from plain_tessera_incremental.notebooks._pdf_evidence_pack import (
-    field_figure_path,
-    load_evidence_pack,
-    mixture_outcomes,
-    overview_figure_path,
-    plot_mixture_outcomes,
-    presentation_facts,
-    select_representative_fields,
-)
 from plain_tessera_incremental.storage import (
     canonical_sha256,
     write_dataframe_atomic,
@@ -35,6 +27,34 @@ from plain_tessera_incremental.storage import (
     write_json_atomic,
 )
 from plain_tessera_incremental.windows import PrefixWindow
+
+
+def test_pdf_evidence_pack_notebook_is_standalone() -> None:
+    notebook_path = (
+        Path(__file__).parents[1]
+        / "notebooks"
+        / "intercropping_pdf_evidence_pack.ipynb"
+    )
+    notebook = json.loads(notebook_path.read_text())
+    code = "\n".join(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "code"
+    )
+    tree = ast.parse(code)
+    project_imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            project_imports.extend(
+                alias.name
+                for alias in node.names
+                if alias.name.startswith("plain_tessera_incremental")
+            )
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module.startswith("plain_tessera_incremental"):
+                project_imports.append(module)
+    assert project_imports == []
 
 
 def _fixture(root: Path) -> tuple[Path, int]:
@@ -347,27 +367,6 @@ def test_all_field_all_window_workflow_and_exports(tmp_path: Path) -> None:
     assert (root / "tables" / "pixel_scores" / "window_id=w4" / "part-00000.parquet").is_file()
     assert (root / "figures" / "cohort_overview.png").is_file()
     assert (root / "COMPLETED.json").is_file()
-
-    evidence_pack = load_evidence_pack(root)
-    facts = presentation_facts(evidence_pack)
-    examples = select_representative_fields(evidence_pack)
-    assert facts["analysis"]["scored_physical_fields"] == len(
-        report_output["field_paths"]
-    )
-    assert {"Bean and Maize", "Irish Potato and Maize"}.issubset(
-        set(examples["landcover"])
-    )
-    assert "monocrop negative control" in set(examples["role"])
-    assert "model guardrail example" in set(examples["role"])
-    assert overview_figure_path(evidence_pack).is_file()
-    for field_uid in examples["field_uid"]:
-        assert field_figure_path(evidence_pack, str(field_uid)).is_file()
-    outcome_figure = plot_mixture_outcomes(
-        mixture_outcomes(evidence_pack),
-        windows=evidence_pack.manifest["windows"],
-    )
-    assert len(outcome_figure.axes) == 2
-    plt.close(outcome_figure)
 
     rerun_root, _ = save_workflow_tables(result)
     assert rerun_root == root

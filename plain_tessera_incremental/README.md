@@ -295,12 +295,15 @@ python -m jupyter lab \
   plain_tessera_incremental/notebooks/intercropping_pdf_evidence_pack.ipynb
 ```
 
-It reads only the finalized tables and saved PNGs. It prints one copyable fact
-sheet and displays the cohort overview, incremental outcome figure, typical
-examples for both mixture labels, a monocrop negative control, and a model
-guardrail example. Example selection is anchored at `w3` and uses cohort-median
-evidence rather than maximum evidence. Set `TESSERA_DNA_ANALYSIS_DIR` only when
-you need to point it at a specific completed analysis directory.
+The notebook is standalone: all loading, summarization, selection, and plotting
+logic lives inside its hidden setup cell, with no imports from project helper
+modules. It reads only the finalized tables and saved PNGs. It prints one
+copyable fact sheet and displays the cohort overview, incremental outcome
+figure, typical examples for both mixture labels, a monocrop negative control,
+and a model guardrail example. Example selection is anchored at `w3` and uses
+cohort-median evidence rather than maximum evidence. Set
+`TESSERA_DNA_ANALYSIS_DIR` only when you need to point it at a specific completed
+analysis directory.
 
 The older
 [`notebooks/intercropping_embedding_dna.ipynb`](notebooks/intercropping_embedding_dna.ipynb)

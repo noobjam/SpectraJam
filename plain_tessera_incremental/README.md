@@ -307,9 +307,44 @@ analysis directory.
 
 ## Progressive intercropping separability
 
+[`notebooks/intercropping_parent_evidence_v2.ipynb`](notebooks/intercropping_parent_evidence_v2.ipynb)
+is the current primary intercropping experiment. It learns each parent axis from
+field-balanced monocrop pixels only, cross-fits pixel parent evidence, aggregates
+distributional, temporal, and within-field spatial features, and evaluates a
+binary `intercrop vs monocrop` detector on untouched physical fields. The
+matched evaluation compares the raw embedding baseline, parent evidence alone,
+and a predeclared raw-plus-parent hybrid, so the analysis is not forced to
+assume that every intercropping signal is a linear two-parent mixture.
+
+The operating threshold is selected inside each outer training fold. Among
+thresholds with training false-positive rate at most 10%, it maximizes
+intercrop recall; the notebook reports the actual held-out false-positive rate.
+Its confirmatory gate requires at least 30 intercropped fields, AUROC and its
+uncertainty above chance, useful average-precision lift, at least 60% held-out
+recall, at most 15% held-out monocrop false positives, and an independently
+working monocrop parent axis. With only 11 Irish-Potato-and-Maize fields, that
+family is always labelled exploratory regardless of its point estimates.
+
+```bash
+cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
+source .venv/bin/activate
+
+python -m jupyter lab \
+  plain_tessera_incremental/notebooks/intercropping_parent_evidence_v2.ipynb
+```
+
+The standalone notebook makes no STAC requests and runs no TESSERA inference.
+It saves every outer-fold field prediction, every cross-fitted pixel parent
+score, the parent-fit leakage audit, model comparisons, gate decisions, and
+seven 200 dpi figures beneath
+`/mnt/noobjam/harvard_tessera_incremental_v2/analysis/intercropping_parent_evidence_v2/`.
+Its last cell prints one `PDF_HANDOFF_V2_BEGIN ... PDF_HANDOFF_V2_END` block.
+
+The earlier
 [`notebooks/intercropping_temporal_separability.ipynb`](notebooks/intercropping_temporal_separability.ipynb)
-is the primary test of whether progressive TESSERA embeddings distinguish each
-intercropping label from both corresponding monocrops. It does not assume that
+is retained as the direct three-class baseline for whether progressive TESSERA
+embeddings distinguish each intercropping label from both corresponding
+monocrops. It does not assume that
 an intercrop must be a linear parent mixture. The two held-out three-class tasks
 are Bean versus Maize versus Bean-and-Maize, and Irish Potato versus Maize
 versus Irish-Potato-and-Maize.

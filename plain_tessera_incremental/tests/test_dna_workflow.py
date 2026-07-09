@@ -34,6 +34,7 @@ def test_presentation_notebooks_are_standalone() -> None:
     notebook_names = (
         "intercropping_pdf_evidence_pack.ipynb",
         "intercropping_temporal_separability.ipynb",
+        "intercropping_parent_evidence_v2.ipynb",
     )
     for notebook_name in notebook_names:
         notebook = json.loads((notebook_dir / notebook_name).read_text())
@@ -66,6 +67,17 @@ def test_presentation_notebooks_are_standalone() -> None:
     assert "PDF_HANDOFF_BEGIN" in temporal_source
     assert "PDF_HANDOFF_END" in temporal_source
     assert "PDF_HANDOFF.json" in temporal_source
+
+    parent_evidence_source = (
+        notebook_dir / "intercropping_parent_evidence_v2.ipynb"
+    ).read_text()
+    for figure_number in range(1, 8):
+        assert f"0{figure_number}_" in parent_evidence_source
+    assert "PDF_HANDOFF_V2_BEGIN" in parent_evidence_source
+    assert "PDF_HANDOFF_V2_END" in parent_evidence_source
+    assert "mixture_fields_in_parent_fit" in parent_evidence_source
+    assert "TARGET_TRAIN_FPR" in parent_evidence_source
+    assert "hybrid_parent_evidence" in parent_evidence_source
 
 
 def _fixture(root: Path) -> tuple[Path, int]:

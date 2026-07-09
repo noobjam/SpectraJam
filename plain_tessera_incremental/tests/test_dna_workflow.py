@@ -37,6 +37,7 @@ def test_presentation_notebooks_are_standalone() -> None:
         "intercropping_parent_evidence_v2.ipynb",
         "intercropping_harvard_multilens.ipynb",
         "intercropping_harvard_only_workbench.ipynb",
+        "intercropping_harvard_one_click.ipynb",
     )
     for notebook_name in notebook_names:
         notebook = json.loads((notebook_dir / notebook_name).read_text())
@@ -109,6 +110,21 @@ def test_presentation_notebooks_are_standalone() -> None:
     assert "results = run_harvard_evaluation(feature_bundle)" in harvard_workbench_source
     assert "ANALYSIS_DIR" not in harvard_workbench_source
     assert "load_handoff_exports" not in harvard_workbench_source
+
+    one_click_notebook = json.loads(
+        (notebook_dir / "intercropping_harvard_one_click.ipynb").read_text()
+    )
+    one_click_cells = [
+        cell for cell in one_click_notebook["cells"] if cell["cell_type"] == "code"
+    ]
+    assert len(one_click_cells) == 1
+    one_click_source = "".join(one_click_cells[0]["source"])
+    assert "data_bundle = load_harvard_data()" in one_click_source
+    assert "handoff = finalize_harvard_workbench(" in one_click_source
+    assert 'root / "COMPLETED.json"' not in one_click_source
+    assert "ANALYSIS_DIR" not in one_click_source
+    assert "HARVARD_WORKBENCH_HANDOFF_BEGIN" in one_click_source
+    assert "HARVARD_WORKBENCH_HANDOFF_END" in one_click_source
 
 
 def test_harvard_multilens_handoff_recovers_after_kernel_restart(

@@ -305,9 +305,9 @@ cohort-median evidence rather than maximum evidence. Set
 `TESSERA_DNA_ANALYSIS_DIR` only when you need to point it at a specific completed
 analysis directory.
 
-## Harvard-only multi-lens workbench
+## Harvard-only one-click workbench
 
-[`notebooks/intercropping_harvard_only_workbench.ipynb`](notebooks/intercropping_harvard_only_workbench.ipynb)
+[`notebooks/intercropping_harvard_one_click.ipynb`](notebooks/intercropping_harvard_one_click.ipynb)
 is the recommended next analysis before adding another field dataset. It uses
 only the frozen Harvard v2 field artifacts and the daily Sentinel-1/Sentinel-2
 arrays already retained in their task caches. It performs no STAC requests,
@@ -336,19 +336,19 @@ are threshold-free primary metrics. Recall and false-positive rate use a
 separate inner spatial calibration fold, and the calibration model is not
 refitted before outer testing.
 
-The notebook follows the same structure as the earlier working notebooks. One
-hidden setup cell contains every import, loader, model, plotting function, and
-export helper. The visible cells pass explicit `data_bundle`, `feature_bundle`,
-and `results` objects through the workflow; there are no project imports or
-external notebook-state variables. Execute it from top to bottom with **Run All
-Cells**.
+The notebook contains exactly one executable cell. That cell contains every
+import, loader, model, plot, and export in one scope, so there is no cross-cell
+state or execution order to manage. It has no project imports and does not
+require a pipeline `COMPLETED.json` marker; `run.json`, `fields.parquet`,
+`pixels.parquet`, and `field_pixels.parquet` are the static prerequisites. Run
+the single code cell once.
 
 ```bash
 cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
 source .venv/bin/activate
 
 python -m jupyter lab \
-  plain_tessera_incremental/notebooks/intercropping_harvard_only_workbench.ipynb
+  plain_tessera_incremental/notebooks/intercropping_harvard_one_click.ipynb
 ```
 
 Exports are snapshot-specific beneath

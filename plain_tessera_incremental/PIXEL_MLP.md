@@ -114,6 +114,17 @@ tail -f logs/rwanda_worldcover_noncrop_embeddings.log
 cat /mnt/noobjam/rwanda_worldcover_mlp/tessera_embeddings/COMPLETED.json
 ```
 
+To inspect live progress and embedding health without waiting for completion,
+open the companion notebook from the repository root:
+
+```bash
+python -m jupyter lab plain_tessera_incremental/notebooks/inspect_worldcover_lulc_embeddings.ipynb
+```
+
+It verifies the published shard metadata/schema, reports per-class and per-window
+completion plus S1/S2 observation coverage, and displays a sampled PCA/map
+diagnostic. Set `TESSERA_OUTPUT_DIR` only if the embedding output is elsewhere.
+
 ## 5. Build the classification dataset
 
 The builder uses `w2` by default, excludes ambiguous Harvard pixels, removes

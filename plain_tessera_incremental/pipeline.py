@@ -384,6 +384,17 @@ def preflight(config: PipelineConfig) -> dict[str, Any]:
         columns=sorted(_required_columns(config)),
     )
     validate_ground_truth_values(validation_frame, config)
+    _, preflight_pixels, preflight_memberships = prepare_field_pixels(
+        validation_frame, config
+    )
+    task_columns = [
+        "utm_epsg",
+        "work_x_index",
+        "work_y_index",
+        "chunk_x_index",
+        "chunk_y_index",
+    ]
+    task_count = int(preflight_memberships.groupby(task_columns).ngroups)
     runtime = runtime_identity(config)
     checkpoint_sha256 = sha256_file(config.checkpoint_path)
     if config.checkpoint_sha256 and checkpoint_sha256 != config.checkpoint_sha256:
@@ -395,6 +406,10 @@ def preflight(config: PipelineConfig) -> dict[str, Any]:
         "input_parquet": str(config.input_parquet),
         "input_columns": list(columns),
         "input_rows": len(validation_frame),
+        "unique_pixel_count": len(preflight_pixels),
+        "field_pixel_membership_count": len(preflight_memberships),
+        "estimated_task_count": task_count,
+        "expected_embedding_rows": len(preflight_memberships) * len(config.windows),
         "checkpoint_path": str(config.checkpoint_path),
         "checkpoint_sha256": checkpoint_sha256,
         "output_dir": str(config.output_dir),

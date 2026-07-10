@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,7 +40,7 @@ from plain_tessera_incremental.materialize import (
     select_s1_daily_mosaic,
     select_s2_daily_mosaic,
 )
-from plain_tessera_incremental.pipeline import prepare_field_pixels
+from plain_tessera_incremental.pipeline import preflight, prepare_field_pixels
 from plain_tessera_incremental.storage import write_embedding_shard
 from plain_tessera_incremental.windows import PrefixWindow
 from plain_tessera_incremental.windows import build_prefix_windows
@@ -128,6 +129,38 @@ class GeometryTests(unittest.TestCase):
         self.assertGreater(int(outside_fields.loc[0, "pixel_count"]), 0)
         self.assertFalse(outside_pixels.empty)
         self.assertFalse(outside_memberships.empty)
+
+    def test_preflight_reports_task_and_embedding_cardinality(self) -> None:
+        config = load_config(Path(__file__).parents[1] / "config.yaml")
+        source = pd.DataFrame(
+            {
+                "LONGITUDE": [3.00015],
+                "LATITUDE": [1.00015],
+                "QUADKEY": ["q"],
+                "landcover": ["crop"],
+                "wkt": [shapely.box(3.0, 1.0, 3.0003, 1.0003).wkt],
+                "id": [622],
+            }
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_path = root / "input.parquet"
+            source.to_parquet(input_path)
+            checkpoint = root / "checkpoint.pt"
+            checkpoint.write_bytes(b"fixture")
+            config = replace(
+                config,
+                input_parquet=input_path,
+                checkpoint_path=checkpoint,
+                checkpoint_sha256=None,
+                output_dir=root / "output",
+                device="cpu",
+            )
+            with patch("plain_tessera_incremental.pipeline.runtime_identity", return_value={}):
+                result = preflight(config)
+        self.assertGreater(result["unique_pixel_count"], 0)
+        self.assertGreaterEqual(result["estimated_task_count"], 1)
+        self.assertEqual(result["expected_embedding_rows"], result["field_pixel_membership_count"] * 4)
 
 
 class PreprocessingTests(unittest.TestCase):

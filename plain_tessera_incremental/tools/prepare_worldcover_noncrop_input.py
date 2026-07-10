@@ -215,6 +215,46 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     os.replace(part, path)
 
 
+def _patch_geometry(record: dict[str, Any], width_m: int, shapely: Any) -> Any:
+    cells = width_m // PIXEL_SIZE_M
+    left_index = int(record["pixel_x_index"]) - cells // 2
+    bottom_index = int(record["pixel_y_index"]) - cells // 2
+    return shapely.box(
+        left_index * PIXEL_SIZE_M,
+        bottom_index * PIXEL_SIZE_M,
+        (left_index + cells) * PIXEL_SIZE_M,
+        (bottom_index + cells) * PIXEL_SIZE_M,
+    )
+
+
+def _patch_is_pure(
+    record: dict[str, Any],
+    class_code: int,
+    width_m: int,
+    purity_radius_m: float,
+    inverse: Any,
+    datasets: dict[str, Any],
+    np: Any,
+) -> bool:
+    """Require one WorldCover class across every patch cell and its purity halo."""
+    cells = width_m // PIXEL_SIZE_M
+    halo_cells = math.ceil(purity_radius_m / PIXEL_SIZE_M)
+    left_index = int(record["pixel_x_index"]) - cells // 2 - halo_cells
+    bottom_index = int(record["pixel_y_index"]) - cells // 2 - halo_cells
+    indices = np.arange(cells + 2 * halo_cells, dtype=np.int64)
+    x_indices, y_indices = np.meshgrid(left_index + indices, bottom_index + indices)
+    xs = (x_indices.reshape(-1).astype(np.float64) + 0.5) * PIXEL_SIZE_M
+    ys = (y_indices.reshape(-1).astype(np.float64) + 0.5) * PIXEL_SIZE_M
+    longitudes, latitudes = inverse.transform(xs, ys)
+    values = _sample_worldcover(
+        np.asarray(longitudes, dtype=np.float64),
+        np.asarray(latitudes, dtype=np.float64),
+        datasets,
+        np,
+    )
+    return bool(np.all(values == class_code))
+
+
 def prepare(args: argparse.Namespace) -> dict[str, Any]:
     if args.samples_per_class < 1 or args.lattice_spacing_m < 20:
         raise ValueError("samples-per-class must be positive and lattice spacing must be >= 20 m")
@@ -222,6 +262,11 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("chunk-size must be positive")
     if args.purity_radius_m < 0 or args.exclusion_buffer_m < 0:
         raise ValueError("purity and exclusion distances must be non-negative")
+    if args.patch_width_m:
+        if args.patch_width_m < PIXEL_SIZE_M or args.patch_width_m % PIXEL_SIZE_M:
+            raise ValueError("patch-width-m must be a positive multiple of 10 m")
+    if args.patch_candidate_multiplier < 1:
+        raise ValueError("patch-candidate-multiplier must be positive")
     requested_codes = tuple(args.class_codes or DEFAULT_NONCROP_CODES)
     unknown = sorted(set(requested_codes) - set(DEFAULT_NONCROP_CODES))
     if unknown:
@@ -242,13 +287,16 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         if args.exclude_wkt_parquet is None
         else Path(args.exclude_wkt_parquet).expanduser()
     )
+    patch_margin_m = math.sqrt(2.0) * args.patch_width_m / 2.0
     exclusion = _load_exclusion(
         exclusion_path,
         args.wkt_column,
-        args.exclusion_buffer_m,
+        args.exclusion_buffer_m + patch_margin_m,
         dependencies,
     )
-    sampling_boundary = boundary.buffer(-math.sqrt(2.0) * args.purity_radius_m)
+    sampling_boundary = boundary.buffer(
+        -math.sqrt(2.0) * (args.purity_radius_m + args.patch_width_m / 2.0)
+    )
     if sampling_boundary.is_empty:
         raise ContractError("purity radius removes the complete Rwanda sampling extent")
     inverse = pyproj.Transformer.from_crs(TARGET_EPSG, 4326, always_xy=True)
@@ -259,6 +307,9 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     x_count = x_last - x_first + 1
     envelope_count = x_count * (y_last - y_first + 1)
     heaps: dict[int, list[tuple[int, str, dict[str, Any]]]] = {}
+    candidate_limit = args.samples_per_class * (
+        args.patch_candidate_multiplier if args.patch_width_m else 1
+    )
     pure_counts: Counter[int] = Counter()
     inspected = 0
 
@@ -333,32 +384,54 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                     heaps,
                     class_code,
                     record,
-                    args.samples_per_class,
+                    candidate_limit,
                     args.seed,
                 )
 
-    selected = [
-        entry[2]
-        for class_code in sorted(heaps)
-        for entry in sorted(heaps[class_code], key=lambda value: (-value[0], value[1]))
-    ]
-    if not selected:
+        selected_records: list[dict[str, Any]] = []
+        for class_code in sorted(heaps):
+            selected_for_class = 0
+            for _, _, record in sorted(heaps[class_code], key=lambda value: (-value[0], value[1])):
+                if args.patch_width_m and not _patch_is_pure(
+                    record,
+                    class_code,
+                    args.patch_width_m,
+                    args.purity_radius_m,
+                    inverse,
+                    datasets,
+                    np,
+                ):
+                    continue
+                selected_records.append(record)
+                selected_for_class += 1
+                if selected_for_class == args.samples_per_class:
+                    break
+
+    if not selected_records:
         raise RuntimeError("no pure non-crop WorldCover samples were selected")
     forward_geometry = pyproj.Transformer.from_crs(TARGET_EPSG, 4326, always_xy=True)
     half_width = args.wkt_width_m / 2.0
     rows = []
-    for record in selected:
+    for record in selected_records:
         class_code = int(record["worldcover_class"])
-        geometry_metric = shapely.box(
-            record["x"] - half_width,
-            record["y"] - half_width,
-            record["x"] + half_width,
-            record["y"] + half_width,
+        geometry_metric = (
+            _patch_geometry(record, args.patch_width_m, shapely)
+            if args.patch_width_m
+            else shapely.box(
+                record["x"] - half_width,
+                record["y"] - half_width,
+                record["x"] + half_width,
+                record["y"] + half_width,
+            )
         )
         geometry_wgs84 = transform_geometry(forward_geometry.transform, geometry_metric)
         rows.append(
             {
-                "id": f"wc2021-{class_code:03d}-{record['pixel_id']}",
+                "id": (
+                    f"wc2021-{class_code:03d}-patch{args.patch_width_m}m-{record['pixel_id']}"
+                    if args.patch_width_m
+                    else f"wc2021-{class_code:03d}-{record['pixel_id']}"
+                ),
                 "landcover": f"Non-crop: {WORLD_COVER_LABELS[class_code]}",
                 "wkt": geometry_wgs84.wkt,
                 "LONGITUDE": record["longitude"],
@@ -393,6 +466,8 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             "lattice_spacing_m": args.lattice_spacing_m,
             "purity_radius_m": args.purity_radius_m,
             "wkt_width_m": args.wkt_width_m,
+            "patch_width_m": args.patch_width_m,
+            "patch_candidate_multiplier": args.patch_candidate_multiplier,
             "exclusion_buffer_m": args.exclusion_buffer_m,
             "exclude_wkt_parquet": None if exclusion_path is None else str(exclusion_path),
         },
@@ -429,6 +504,18 @@ def main() -> None:
     parser.add_argument("--lattice-spacing-m", type=float, default=200.0)
     parser.add_argument("--purity-radius-m", type=float, default=20.0)
     parser.add_argument("--wkt-width-m", type=float, default=2.0)
+    parser.add_argument(
+        "--patch-width-m",
+        type=int,
+        default=0,
+        help="emit pure square patches instead of single-pixel WKTs (multiple of 10 m)",
+    )
+    parser.add_argument(
+        "--patch-candidate-multiplier",
+        type=int,
+        default=64,
+        help="rank this many candidates per requested pure patch before validation",
+    )
     parser.add_argument("--seed", type=int, default=24_051_995)
     parser.add_argument("--chunk-size", type=int, default=50_000)
     parser.add_argument("--exclude-wkt-parquet")

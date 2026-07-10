@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import shapely
 
 from plain_tessera_incremental.tools.build_pixel_classification_dataset import (
     build,
@@ -22,6 +23,7 @@ from plain_tessera_incremental.tools.download_rwanda_worldcover import (
 from plain_tessera_incremental.tools.prepare_worldcover_noncrop_input import (
     DEFAULT_NONCROP_CODES,
     _keep_smallest,
+    _patch_geometry,
 )
 from plain_tessera_incremental.tools.train_pixel_mlp import classification_metrics
 from spectrajam.frame_sources import FRAME_SOURCES
@@ -65,6 +67,15 @@ def test_deterministic_sampler_retains_smallest_hash_ranks() -> None:
         )[:5]
     }
     assert selected == expected
+
+
+def test_patch_geometry_contains_exactly_the_requested_10m_cells() -> None:
+    geometry = _patch_geometry(
+        {"pixel_x_index": 100, "pixel_y_index": 200},
+        width_m=100,
+        shapely=shapely,
+    )
+    assert geometry.bounds == (950.0, 1950.0, 1050.0, 2050.0)
 
 
 def test_collapse_removes_conflicting_and_invalid_pixel_rows() -> None:

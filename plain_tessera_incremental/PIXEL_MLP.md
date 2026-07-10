@@ -20,8 +20,9 @@ them with unambiguous pure-crop pixels.
   center and all eight positions at a 20 m radius.
 - Known Harvard field geometries can be buffered by 30 m and excluded from
   non-crop sampling.
-- The generated 2 m WKT around each selected center causes the existing
-  pipeline to embed exactly one globally snapped 10 m TESSERA pixel.
+- The fast workflow below selects WorldCover-homogeneous 100 m patches. Every
+  patch contains 100 separately embedded 10 m pixels, so one satellite
+  materialization serves many training rows.
 - WorldCover is weak supervision, not field-survey truth. Its 2021 date also
   differs from the 2024–2025 imagery used by the default `w2` embedding.
 - Because WorldCover itself was produced from Sentinel-1/2, held-out metrics on
@@ -68,38 +69,44 @@ The default source directory is:
 
 ## 3. Build deterministic non-crop WKT samples
 
-### Fast pilot: 100 locations per class
+### Fast pilot: 8 pure 100 m patches per class
 
-Use this first. It selects at most 700 non-crop locations (100 for each of the
-seven WorldCover classes) and retains the same four cumulative windows as the
-Harvard crop run. The dataset builder uses `w2` by default. This is sufficient
-to check the end-to-end spatial classifier workflow, but it is deliberately too
-small for final performance claims.
+Use this first. It selects at most 56 WorldCover-homogeneous patches (eight per
+class). Each patch is checked at every 10 m cell plus a 20 m halo, then produces
+100 individual 10 m embeddings. This yields up to 5,600 non-crop training rows
+while requiring roughly tens—not hundreds—of satellite materialization tasks.
+The four temporal windows remain identical to the Harvard crop run.
 
 ```bash
 python -m plain_tessera_incremental.tools.prepare_worldcover_noncrop_input \
   --class-codes 10 20 30 50 60 80 90 \
-  --samples-per-class 100 \
+  --samples-per-class 8 \
+  --patch-width-m 100 \
   --exclude-wkt-parquet /mnt/foundry-az/playground/data/ground_truth/harvard_wkt.parquet \
-  --output /mnt/noobjam/rwanda_worldcover_mlp/worldcover_noncrop_wkt_pilot_100.parquet
+  --output /mnt/noobjam/rwanda_worldcover_mlp/worldcover_noncrop_fast_patches.parquet
 
 python -m plain_tessera_incremental \
-  --config plain_tessera_incremental/config_worldcover_noncrop_pilot_w2.yaml \
+  --config plain_tessera_incremental/config_worldcover_noncrop_fast.yaml \
   --preflight-only
 
 mkdir -p logs
 nohup python -m plain_tessera_incremental \
-  --config plain_tessera_incremental/config_worldcover_noncrop_pilot_w2.yaml \
-  > logs/rwanda_worldcover_noncrop_pilot_w2.log 2>&1 &
-echo $! > logs/rwanda_worldcover_noncrop_pilot_w2.pid
+  --config plain_tessera_incremental/config_worldcover_noncrop_fast.yaml \
+  > logs/rwanda_worldcover_noncrop_fast.log 2>&1 &
+echo $! > logs/rwanda_worldcover_noncrop_fast.pid
 ```
+
+Before launching, inspect the preflight JSON. For this fast design, expect at
+most 56 input fields, up to 5,600 unique 10 m pixels, and approximately 56
+tasks (often fewer when patches share a 1.28 km chunk). Do not launch if the
+reported `estimated_task_count` is unexpectedly large.
 
 After completion, point the builder at this pilot output:
 
 ```bash
 python -m plain_tessera_incremental.tools.build_pixel_classification_dataset \
-  --noncrop-root /mnt/noobjam/rwanda_worldcover_mlp/tessera_embeddings_pilot_full \
-  --output /mnt/noobjam/rwanda_worldcover_mlp/pixel_classification_pilot_w2.parquet
+  --noncrop-root /mnt/noobjam/rwanda_worldcover_mlp/tessera_embeddings_fast \
+  --output /mnt/noobjam/rwanda_worldcover_mlp/pixel_classification_fast_w2.parquet
 ```
 
 ### Full run: 2,000 locations per class

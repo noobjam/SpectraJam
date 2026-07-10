@@ -1,0 +1,41 @@
+input:
+  parquet: /mnt/noobjam/rwanda_worldcover_mlp/worldcover_noncrop_fast_patches.parquet
+  crs: EPSG:4326
+
+output_dir: /mnt/noobjam/rwanda_worldcover_mlp/tessera_embeddings_fast
+
+columns:
+  longitude: LONGITUDE
+  latitude: LATITUDE
+  quadkey: QUADKEY
+  label: landcover
+  wkt: wkt
+  id: id
+
+model:
+  checkpoint_path: checkpoints/tessera_v1_1_mpc_encoder.pt
+  checkpoint_sha256: 5dab0f070d5711034f7c241e841eaeedb49fef90b9355f68c8f20b9507839ec3
+
+# Keep the exact Harvard crop temporal contract.
+temporal:
+  start: 2024-09-01
+  cutoffs: [2025-01-01, 2025-05-01, 2025-09-01, 2026-01-01]
+
+grid:
+  pixel_size_m: 10
+  work_tile_m: 20000
+  raster_chunk_pixels: 128
+
+stac:
+  endpoint: https://planetarycomputer.microsoft.com/api/stac/v1
+  collections:
+    s2: sentinel-2-l2a
+    s1: sentinel-1-rtc
+  request_retries: 3
+  query_halo_m: 500
+
+runtime:
+  device: auto
+  batch_size: 256
+  stack_chunksize: 256
+  materialize_workers: 8

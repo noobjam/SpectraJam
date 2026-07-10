@@ -1,5 +1,5 @@
-# Small, single-window WorldCover run for an initial spatial LULC classifier.
-# It intentionally produces w2 only, which matches the dataset-builder default.
+# Small WorldCover run for an initial spatial LULC classifier.
+# It retains the full four-window contract of the Harvard crop embeddings.
 input:
   parquet: /mnt/noobjam/rwanda_worldcover_mlp/worldcover_noncrop_wkt_pilot_100.parquet
   crs: EPSG:4326
@@ -18,10 +18,10 @@ model:
   checkpoint_path: checkpoints/tessera_v1_1_mpc_encoder.pt
   checkpoint_sha256: 5dab0f070d5711034f7c241e841eaeedb49fef90b9355f68c8f20b9507839ec3
 
-# w2 is the classifier's default feature window; omit later windows for this pilot.
+# The dataset builder uses w2 by default, while all four windows remain available.
 temporal:
   start: 2024-09-01
-  cutoffs: [2025-01-01, 2025-05-01]
+  cutoffs: [2025-01-01, 2025-05-01, 2025-09-01, 2026-01-01]
 
 grid:
   pixel_size_m: 10

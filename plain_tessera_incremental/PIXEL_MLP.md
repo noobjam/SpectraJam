@@ -68,12 +68,13 @@ The default source directory is:
 
 ## 3. Build deterministic non-crop WKT samples
 
-### Fast pilot: 100 locations per class and w2 only
+### Fast pilot: 100 locations per class
 
 Use this first. It selects at most 700 non-crop locations (100 for each of the
-seven WorldCover classes) and embeds only the prefixes through `w2`, the window
-used by the dataset builder. It is sufficient to check the end-to-end spatial
-classifier workflow, but it is deliberately too small for final performance claims.
+seven WorldCover classes) and retains the same four cumulative windows as the
+Harvard crop run. The dataset builder uses `w2` by default. This is sufficient
+to check the end-to-end spatial classifier workflow, but it is deliberately too
+small for final performance claims.
 
 ```bash
 python -m plain_tessera_incremental.tools.prepare_worldcover_noncrop_input \

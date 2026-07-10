@@ -98,7 +98,7 @@ After completion, point the builder at this pilot output:
 
 ```bash
 python -m plain_tessera_incremental.tools.build_pixel_classification_dataset \
-  --noncrop-root /mnt/noobjam/rwanda_worldcover_mlp/tessera_embeddings_pilot_w2 \
+  --noncrop-root /mnt/noobjam/rwanda_worldcover_mlp/tessera_embeddings_pilot_full \
   --output /mnt/noobjam/rwanda_worldcover_mlp/pixel_classification_pilot_w2.parquet
 ```
 

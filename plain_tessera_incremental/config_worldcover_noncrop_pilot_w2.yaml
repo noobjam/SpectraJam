@@ -4,7 +4,7 @@ input:
   parquet: /mnt/noobjam/rwanda_worldcover_mlp/worldcover_noncrop_wkt_pilot_100.parquet
   crs: EPSG:4326
 
-output_dir: /mnt/noobjam/rwanda_worldcover_mlp/tessera_embeddings_pilot_w2
+output_dir: /mnt/noobjam/rwanda_worldcover_mlp/tessera_embeddings_pilot_full
 
 columns:
   longitude: LONGITUDE

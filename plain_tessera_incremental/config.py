@@ -86,8 +86,17 @@ class PipelineConfig:
             digest = self.checkpoint_sha256.lower()
             if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
                 raise ValueError("checkpoint_sha256 must be null or a hexadecimal SHA-256")
-        if self.windows[-1].end_exclusive.isoformat() != "2026-01-01":
-            raise ValueError("the final cutoff must be 2026-01-01 to include 2025-12-31")
+        supported_final_cutoffs = {
+            "2025-01-01",
+            "2025-05-01",
+            "2025-09-01",
+            "2026-01-01",
+        }
+        if self.windows[-1].end_exclusive.isoformat() not in supported_final_cutoffs:
+            raise ValueError(
+                "the final cutoff must be a supported cumulative prefix ending "
+                "on 2025-01-01, 2025-05-01, 2025-09-01, or 2026-01-01"
+            )
         if require_files:
             if not self.input_parquet.is_file():
                 raise FileNotFoundError(f"ground-truth parquet not found: {self.input_parquet}")

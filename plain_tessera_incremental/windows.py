@@ -27,8 +27,8 @@ class PrefixWindow:
 def build_prefix_windows(start: str, cutoffs: list[str] | tuple[str, ...]) -> tuple[PrefixWindow, ...]:
     start_date = date.fromisoformat(start)
     end_dates = tuple(date.fromisoformat(value) for value in cutoffs)
-    if len(end_dates) != 4:
-        raise ValueError("exactly four incremental cutoffs are required")
+    if not 1 <= len(end_dates) <= 4:
+        raise ValueError("one to four incremental cutoffs are required")
     if any(left >= right for left, right in zip(end_dates, end_dates[1:], strict=False)):
         raise ValueError("incremental cutoffs must be strictly increasing")
     if end_dates[0] <= start_date:

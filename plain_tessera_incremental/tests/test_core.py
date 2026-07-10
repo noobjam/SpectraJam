@@ -54,9 +54,22 @@ class WindowTests(unittest.TestCase):
         self.assertEqual([window.duration_days for window in windows], [122, 242, 365, 487])
         self.assertEqual(windows[-1].end_exclusive.isoformat(), "2026-01-01")
 
-    def test_requires_four_cutoffs(self) -> None:
-        with self.assertRaisesRegex(ValueError, "exactly four"):
-            build_prefix_windows("2024-09-01", ["2025-01-01"])
+    def test_allows_a_short_prefix_set(self) -> None:
+        windows = build_prefix_windows("2024-09-01", ["2025-01-01", "2025-05-01"])
+        self.assertEqual([window.window_id for window in windows], ["w1", "w2"])
+
+    def test_rejects_more_than_four_cutoffs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "one to four"):
+            build_prefix_windows(
+                "2024-09-01",
+                ["2025-01-01", "2025-05-01", "2025-09-01", "2026-01-01", "2026-05-01"],
+            )
+
+    def test_pilot_config_ends_at_w2(self) -> None:
+        config = load_config(
+            Path(__file__).parents[1] / "config_worldcover_noncrop_pilot_w2.yaml"
+        )
+        self.assertEqual([window.window_id for window in config.windows], ["w1", "w2"])
 
 
 class GeometryTests(unittest.TestCase):

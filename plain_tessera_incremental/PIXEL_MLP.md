@@ -68,6 +68,41 @@ The default source directory is:
 
 ## 3. Build deterministic non-crop WKT samples
 
+### Fast pilot: 100 locations per class and w2 only
+
+Use this first. It selects at most 700 non-crop locations (100 for each of the
+seven WorldCover classes) and embeds only the prefixes through `w2`, the window
+used by the dataset builder. It is sufficient to check the end-to-end spatial
+classifier workflow, but it is deliberately too small for final performance claims.
+
+```bash
+python -m plain_tessera_incremental.tools.prepare_worldcover_noncrop_input \
+  --class-codes 10 20 30 50 60 80 90 \
+  --samples-per-class 100 \
+  --exclude-wkt-parquet /mnt/foundry-az/playground/data/ground_truth/harvard_wkt.parquet \
+  --output /mnt/noobjam/rwanda_worldcover_mlp/worldcover_noncrop_wkt_pilot_100.parquet
+
+python -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_worldcover_noncrop_pilot_w2.yaml \
+  --preflight-only
+
+mkdir -p logs
+nohup python -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_worldcover_noncrop_pilot_w2.yaml \
+  > logs/rwanda_worldcover_noncrop_pilot_w2.log 2>&1 &
+echo $! > logs/rwanda_worldcover_noncrop_pilot_w2.pid
+```
+
+After completion, point the builder at this pilot output:
+
+```bash
+python -m plain_tessera_incremental.tools.build_pixel_classification_dataset \
+  --noncrop-root /mnt/noobjam/rwanda_worldcover_mlp/tessera_embeddings_pilot_w2 \
+  --output /mnt/noobjam/rwanda_worldcover_mlp/pixel_classification_pilot_w2.parquet
+```
+
+### Full run: 2,000 locations per class
+
 ```bash
 python -m plain_tessera_incremental.tools.prepare_worldcover_noncrop_input \
   --class-codes 10 20 30 50 60 80 90 \

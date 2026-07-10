@@ -6,6 +6,9 @@ train, or import the LoRA and distillation runtimes.
 For the exact current git/VM handoff state and copy-paste continuation commands,
 see [`HANDOFF.md`](HANDOFF.md).
 
+For the WorldCover non-crop sampling and pixel-level MLP workflow, see
+[`PIXEL_MLP.md`](PIXEL_MLP.md).
+
 It reads the Harvard field labels from:
 
 ```text

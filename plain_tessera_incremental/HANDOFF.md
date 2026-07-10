@@ -244,9 +244,10 @@ Quick cardinality check:
 python -c 'import json, pathlib; root = pathlib.Path("/mnt/noobjam/harvard_tessera_incremental_v2"); result = json.loads((root / "COMPLETED.json").read_text()); expected = 4 * result["field_pixel_membership_count"]; assert result["embedding_rows"] == expected, (result["embedding_rows"], expected); print("complete:", result)'
 ```
 
-After this gate passes, the next work item is to summarize coverage/outcomes by
-window and land-cover label, then agree on the downstream field-level modelling
-step. That next scientific step is intentionally not implemented yet.
+After this gate passes, the non-crop sampling and pixel-level MLP workflow is
+available in [`PIXEL_MLP.md`](PIXEL_MLP.md). It runs from committed scripts on
+the VM and writes to `/mnt/noobjam/rwanda_worldcover_mlp`, separate from the
+Harvard embedding audit directory.
 
 ## 10. Common failure handling
 

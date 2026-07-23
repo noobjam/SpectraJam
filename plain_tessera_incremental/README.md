@@ -114,6 +114,28 @@ python -m plain_tessera_incremental \
   --config plain_tessera_incremental/config.yaml
 ```
 
+For large polygon sets, use the scalable v3 config instead. It uses 256-pixel
+spatial batches, four bounded remote workers, seven outer retries with jitter,
+and atomic per-date/per-orbit caches. A transient asset failure therefore
+retries only unfinished observation groups instead of repeating the complete
+task.
+
+```bash
+python -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_harvard_scalable.yaml \
+  --preflight-only
+
+nohup python -u -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_harvard_scalable.yaml \
+  > logs/harvard_tessera_scalable_v3.log 2>&1 < /dev/null &
+echo $! > logs/harvard_tessera_scalable_v3.pid
+```
+
+The scalable output is written to
+`/mnt/noobjam/harvard_tessera_incremental_v3`. Completed task timelines remain
+the durable resume unit; temporary group caches are removed only after their
+full timeline has been atomically saved.
+
 The first command must show the VM's intended PyTorch/CUDA build. The install
 intentionally omits the `train` extra so public PyPI cannot replace that
 known-good build; provision PyTorch separately from the VM's matching CUDA

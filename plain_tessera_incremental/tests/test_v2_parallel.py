@@ -5,6 +5,8 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -226,6 +228,67 @@ class ParallelMaterializationTests(unittest.TestCase):
         self.assertIn("https://blob.invalid/a.tif?<redacted>", message)
         self.assertNotIn("top-secret", message)
         self.assertLess(len(set(started)), len(s2_items))
+
+    def test_completed_date_groups_survive_failure_and_are_reused(self) -> None:
+        start = date(2024, 9, 1)
+        s2_items = [_item(f"s2-{ordinal}", start + timedelta(days=ordinal)) for ordinal in range(2)]
+        failed_once = False
+        calls: list[str] = []
+
+        def stack(items, assets, grid, resampling, rescale):
+            nonlocal failed_once
+            identifier = items[0].id
+            calls.append(identifier)
+            if identifier == "s2-1" and not failed_once:
+                failed_once = True
+                raise RuntimeError("HTTP response code: 503")
+            if list(assets) == ["SCL"]:
+                return np.full((1, 1, 1, 1), 4, dtype=np.float32)
+            ordinal = int(identifier.rsplit("-", 1)[1])
+            return np.full((1, 10, 1, 1), 1100 + ordinal, dtype=np.float32)
+
+        materializer = MPCMaterializer(read_retries=0, group_workers=1)
+        with TemporaryDirectory() as directory:
+            cache_dir = Path(directory) / "groups"
+            with (
+                patch(
+                    "plain_tessera_incremental.materialize.unsigned_items",
+                    side_effect=[s2_items, [], s2_items, []],
+                ),
+                patch.object(materializer, "_stack", side_effect=stack),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "HTTP response code: 503"):
+                    materializer.materialize(
+                        [],
+                        [],
+                        RasterWindow(32631, 50_000, 0, 1, 1, 10),
+                        ("pixel",),
+                        np.array([0], dtype=np.int64),
+                        np.array([0], dtype=np.int64),
+                        group_cache_dir=cache_dir,
+                    )
+
+                self.assertEqual(
+                    sorted(path.name for path in cache_dir.glob("*.npz")),
+                    ["s2-2024-09-01.npz"],
+                )
+                calls.clear()
+                timelines = materializer.materialize(
+                    [],
+                    [],
+                    RasterWindow(32631, 50_000, 0, 1, 1, 10),
+                    ("pixel",),
+                    np.array([0], dtype=np.int64),
+                    np.array([0], dtype=np.int64),
+                    group_cache_dir=cache_dir,
+                )
+
+        self.assertEqual(calls, ["s2-1", "s2-1"])
+        np.testing.assert_array_equal(
+            timelines.s2_days,
+            [epoch_day(start), epoch_day(start + timedelta(days=1))],
+        )
+        np.testing.assert_array_equal(timelines.s2_values[:, 0, 0], [100, 101])
 
     def test_group_workers_must_be_positive(self) -> None:
         with self.assertRaisesRegex(ValueError, "group_workers must be positive"):

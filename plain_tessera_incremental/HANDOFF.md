@@ -249,7 +249,33 @@ available in [`PIXEL_MLP.md`](PIXEL_MLP.md). It runs from committed scripts on
 the VM and writes to `/mnt/noobjam/rwanda_worldcover_mlp`, separate from the
 Harvard embedding audit directory.
 
-## 10. Common failure handling
+## 10. Scalable restart for larger polygon sets
+
+Use the scalable config for a clean Harvard run after any fingerprinted pipeline
+change. It writes to `/mnt/noobjam/harvard_tessera_incremental_v3`, leaving v2
+untouched. Its 256-pixel spatial batches reduce task fan-out, while atomic
+per-date/per-orbit caches retain successful remote reads across 429/5xx failures.
+
+```bash
+cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
+source .venv/bin/activate
+mkdir -p logs
+
+python -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_harvard_scalable.yaml \
+  --preflight-only
+
+nohup python -u -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_harvard_scalable.yaml \
+  > logs/harvard_tessera_scalable_v3.log 2>&1 < /dev/null &
+echo $! > logs/harvard_tessera_scalable_v3.pid
+```
+
+The exact `nohup` command is the resume command. Validated full task timelines
+are skipped. Within an interrupted task, only missing date/orbit groups are
+downloaded again.
+
+## 11. Common failure handling
 
 - **Checkpoint SHA mismatch:** stop and provision the exact MPC encoder; do not
   bypass the checksum.

@@ -40,7 +40,11 @@ from plain_tessera_incremental.materialize import (
     select_s1_daily_mosaic,
     select_s2_daily_mosaic,
 )
-from plain_tessera_incremental.pipeline import preflight, prepare_field_pixels
+from plain_tessera_incremental.pipeline import (
+    _load_or_materialize,
+    preflight,
+    prepare_field_pixels,
+)
 from plain_tessera_incremental.storage import write_embedding_shard
 from plain_tessera_incremental.windows import PrefixWindow
 from plain_tessera_incremental.windows import build_prefix_windows
@@ -388,6 +392,45 @@ class InferencePreparationTests(unittest.TestCase):
             loaded = PixelTimelines.load(path)
         self.assertEqual(loaded.pixel_ids, timelines.pixel_ids)
         np.testing.assert_array_equal(loaded.s2_values, timelines.s2_values)
+
+    def test_full_timeline_replaces_incremental_group_cache(self) -> None:
+        timelines = PixelTimelines(
+            pixel_ids=("p1",),
+            s2_values=np.ones((1, 1, 10), np.uint16),
+            s2_valid=np.ones((1, 1), bool),
+            s2_days=np.array([1], np.int32),
+            s1a_values=np.empty((0, 1, 2), np.int16),
+            s1a_valid=np.empty((0, 1), bool),
+            s1a_days=np.empty(0, np.int32),
+            s1d_values=np.empty((0, 1, 2), np.int16),
+            s1d_valid=np.empty((0, 1), bool),
+            s1d_days=np.empty(0, np.int32),
+        )
+
+        class FakeMaterializer:
+            def materialize(self, *args, group_cache_dir, **kwargs):
+                group_cache_dir.mkdir(parents=True)
+                (group_cache_dir / "s2-2024-09-01.npz").write_bytes(b"partial")
+                return timelines
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "cache" / "timeline.npz"
+            group_cache_dir = root / "cache" / "groups" / "task"
+            loaded = _load_or_materialize(
+                path,
+                group_cache_dir,
+                ("p1",),
+                FakeMaterializer(),
+                {"s2_items": [], "s1_items": []},
+                RasterWindow(32631, 0, 0, 1, 1, 10),
+                np.array([0], np.int64),
+                np.array([0], np.int64),
+            )
+
+            self.assertTrue(path.is_file())
+            self.assertFalse(group_cache_dir.exists())
+            self.assertEqual(loaded.pixel_ids, ("p1",))
 
 
 class StorageTests(unittest.TestCase):

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
-from importlib import metadata
 import platform
-from dataclasses import asdict
-from pathlib import Path
+import shutil
 import sys
+from dataclasses import asdict
+from importlib import metadata
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -433,6 +434,7 @@ def preflight(config: PipelineConfig) -> dict[str, Any]:
 
 def _load_or_materialize(
     path: Path,
+    group_cache_dir: Path,
     expected_pixel_ids: tuple[str, ...],
     materializer: MPCMaterializer,
     snapshot: dict[str, Any],
@@ -444,6 +446,7 @@ def _load_or_materialize(
         cached = PixelTimelines.load(path)
         if cached.pixel_ids != expected_pixel_ids:
             raise RuntimeError(f"timeline cache pixel order mismatch: {path}")
+        shutil.rmtree(group_cache_dir, ignore_errors=True)
         return cached
     timelines = materializer.materialize(
         snapshot["s2_items"],
@@ -452,8 +455,10 @@ def _load_or_materialize(
         expected_pixel_ids,
         rows,
         columns,
+        group_cache_dir=group_cache_dir,
     )
     timelines.save(path)
+    shutil.rmtree(group_cache_dir, ignore_errors=True)
     return timelines
 
 
@@ -657,6 +662,7 @@ def run_pipeline(config: PipelineConfig) -> dict[str, Any]:
         cache_path = config.output_dir / "cache" / f"{cache_key}.npz"
         timelines = _load_or_materialize(
             cache_path,
+            config.output_dir / "cache" / "groups" / cache_key,
             pixel_ids,
             materializer,
             snapshot,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import re
 import time
 from collections import defaultdict
@@ -27,6 +28,8 @@ INVALID_SCL = np.array([0, 1, 2, 3, 8, 9], dtype=np.int16)
 EPOCH = date(1970, 1, 1)
 _URL_QUERY = re.compile(r"(https?://[^?\s'\"<>]+)\?[^\s'\"<>]+")
 _MPC_SIGNING_LOCK = Lock()
+_GROUP_CACHE_SCHEMA_VERSION = 1
+_CACHE_MISS = object()
 
 
 def _sanitized_error(error: Exception, limit: int = 2000) -> str:
@@ -115,6 +118,63 @@ def _items_intersecting_grid(
 
 class NoSpatialCoverageError(RuntimeError):
     """The requested assets do not cover the tight task raster window."""
+
+
+def _load_group_cache(
+    path: Path,
+    pixel_count: int,
+    band_count: int,
+    dtype: np.dtype,
+) -> tuple[np.ndarray, np.ndarray] | None | object:
+    if not path.is_file():
+        return _CACHE_MISS
+    try:
+        with np.load(path, allow_pickle=False) as payload:
+            schema_version = int(payload["schema_version"])
+            present = bool(payload["present"])
+            values = payload["values"]
+            valid = payload["valid"]
+    except Exception as error:
+        raise RuntimeError(f"incremental group cache is unreadable: {path}") from error
+    if schema_version != _GROUP_CACHE_SCHEMA_VERSION:
+        raise RuntimeError(f"incremental group cache has the wrong schema: {path}")
+    if not present:
+        if values.size or valid.size:
+            raise RuntimeError(f"empty incremental group cache contains data: {path}")
+        return None
+    expected_values = (pixel_count, band_count)
+    if values.shape != expected_values or values.dtype != dtype:
+        raise RuntimeError(
+            f"incremental group cache values are invalid: {path} "
+            f"({values.shape}, {values.dtype}) != ({expected_values}, {dtype})"
+        )
+    if valid.shape != (pixel_count,) or valid.dtype != np.bool_:
+        raise RuntimeError(f"incremental group cache validity is invalid: {path}")
+    return values, valid
+
+
+def _write_group_cache(
+    path: Path,
+    result: tuple[np.ndarray, np.ndarray] | None,
+    band_count: int,
+    dtype: np.dtype,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".part")
+    if result is None:
+        values = np.empty((0, band_count), dtype=dtype)
+        valid = np.empty(0, dtype=bool)
+    else:
+        values, valid = result
+    with temporary.open("wb") as stream:
+        np.savez(
+            stream,
+            schema_version=np.asarray(_GROUP_CACHE_SCHEMA_VERSION, dtype=np.uint8),
+            present=np.asarray(result is not None, dtype=bool),
+            values=values,
+            valid=valid,
+        )
+    temporary.replace(path)
 
 
 def harmonize_s2_mpc(values: np.ndarray) -> np.ndarray:
@@ -265,6 +325,7 @@ class MPCMaterializer:
     ) -> np.ndarray:
         try:
             import stackstac
+            from rasterio import Env
             from rasterio.enums import Resampling
         except ImportError as error:
             raise RuntimeError("install plain_tessera_incremental/requirements.txt") from error
@@ -311,18 +372,26 @@ class MPCMaterializer:
                 # Date/orbit groups are already parallelized by the bounded outer
                 # pool. Keep each Dask graph synchronous to avoid an unbounded
                 # nested thread pool multiplying remote COG requests.
-                return (
-                    data.transpose("time", "band", "y", "x").compute(scheduler="synchronous").values
-                )
+                with Env(
+                    GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+                    GDAL_HTTP_MAX_RETRY=min(3, self.read_retries),
+                    GDAL_HTTP_RETRY_DELAY=1,
+                ):
+                    return (
+                        data.transpose("time", "band", "y", "x")
+                        .compute(scheduler="synchronous")
+                        .values
+                    )
             except NoSpatialCoverageError:
                 raise
             except Exception as error:
                 last_error = error
                 if attempt >= self.read_retries:
                     break
-                delay = min(2**attempt, 8)
+                base_delay = min(2**attempt, 60)
+                delay = base_delay + random.uniform(0.0, min(1.0, base_delay * 0.25))
                 LOGGER.warning(
-                    "raster read failed (%d/%d, %s); re-signing and retrying in %ds: %s",
+                    "raster read failed (%d/%d, %s); re-signing and retrying in %.1fs: %s",
                     attempt + 1,
                     self.read_retries + 1,
                     type(error).__name__,
@@ -386,6 +455,7 @@ class MPCMaterializer:
         pixel_ids: tuple[str, ...],
         rows: np.ndarray,
         columns: np.ndarray,
+        group_cache_dir: Path | None = None,
     ) -> PixelTimelines:
         if rows.shape != columns.shape or rows.shape != (len(pixel_ids),):
             raise ValueError("pixel IDs and raster indices do not align")
@@ -394,32 +464,83 @@ class MPCMaterializer:
         grid_bounds_wgs84 = projected_bounds_to_wgs84(grid.bounds, grid.epsg)
 
         def process_s2_group(
+            observed: date,
             items: Sequence[object],
         ) -> tuple[np.ndarray, np.ndarray] | None:
+            cache_path = (
+                None
+                if group_cache_dir is None
+                else group_cache_dir / f"s2-{observed.isoformat()}.npz"
+            )
+            if cache_path is not None:
+                cached = _load_group_cache(
+                    cache_path,
+                    len(pixel_ids),
+                    len(S2_BANDS),
+                    np.dtype(np.uint16),
+                )
+                if cached is not _CACHE_MISS:
+                    return cached
             items = _items_intersecting_grid(items, S2_ASSETS, grid, grid_bounds_wgs84)
             if not items:
-                return None
-            try:
-                scl = self._stack(items, ["SCL"], grid, "nearest", rescale=False)
-                bands = self._stack(items, S2_BANDS, grid, "bilinear", rescale=False)
-            except NoSpatialCoverageError:
-                return None
-            return select_s2_daily_mosaic(
-                scl[:, 0, rows, columns],
-                bands[:, :, rows, columns],
-            )
+                result = None
+            else:
+                try:
+                    scl = self._stack(items, ["SCL"], grid, "nearest", rescale=False)
+                    bands = self._stack(items, S2_BANDS, grid, "bilinear", rescale=False)
+                except NoSpatialCoverageError:
+                    result = None
+                else:
+                    result = select_s2_daily_mosaic(
+                        scl[:, 0, rows, columns],
+                        bands[:, :, rows, columns],
+                    )
+            if cache_path is not None:
+                _write_group_cache(
+                    cache_path,
+                    result,
+                    len(S2_BANDS),
+                    np.dtype(np.uint16),
+                )
+            return result
 
         def process_s1_group(
+            observed: date,
+            orbit: str,
             items: Sequence[object],
         ) -> tuple[np.ndarray, np.ndarray] | None:
+            cache_path = (
+                None
+                if group_cache_dir is None
+                else group_cache_dir / f"s1-{observed.isoformat()}-{orbit}.npz"
+            )
+            if cache_path is not None:
+                cached = _load_group_cache(
+                    cache_path,
+                    len(pixel_ids),
+                    len(S1_ASSETS),
+                    np.dtype(np.int16),
+                )
+                if cached is not _CACHE_MISS:
+                    return cached
             items = _items_intersecting_grid(items, S1_ASSETS, grid, grid_bounds_wgs84)
             if not items:
-                return None
-            try:
-                bands = self._stack(items, S1_ASSETS, grid, "nearest", rescale=True)
-            except NoSpatialCoverageError:
-                return None
-            return select_s1_daily_mosaic(bands[:, :, rows, columns])
+                result = None
+            else:
+                try:
+                    bands = self._stack(items, S1_ASSETS, grid, "nearest", rescale=True)
+                except NoSpatialCoverageError:
+                    result = None
+                else:
+                    result = select_s1_daily_mosaic(bands[:, :, rows, columns])
+            if cache_path is not None:
+                _write_group_cache(
+                    cache_path,
+                    result,
+                    len(S1_ASSETS),
+                    np.dtype(np.int16),
+                )
+            return result
 
         s2_groups = list(self._group_s2(s2_items).items())
         s1_groups = list(self._group_s1(s1_items).items())
@@ -444,11 +565,11 @@ class MPCMaterializer:
                     if index < len(s2_groups):
                         observed, items = s2_groups[index]
                         ordered_groups.append(("s2", observed, None))
-                        futures.append(executor.submit(process_s2_group, items))
+                        futures.append(executor.submit(process_s2_group, observed, items))
                     if index < len(s1_groups):
                         (observed, orbit), items = s1_groups[index]
                         ordered_groups.append(("s1", observed, orbit))
-                        futures.append(executor.submit(process_s1_group, items))
+                        futures.append(executor.submit(process_s1_group, observed, orbit, items))
                 results = self._ordered_results(futures, executor)
             except BaseException:
                 executor.shutdown(wait=True, cancel_futures=True)

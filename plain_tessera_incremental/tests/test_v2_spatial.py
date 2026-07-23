@@ -37,6 +37,15 @@ def test_v2_defaults_use_separate_output_and_500m_query_halo() -> None:
         replace(config, materialize_workers=0).validate()
 
 
+def test_scalable_config_uses_larger_tasks_and_resilient_remote_reads() -> None:
+    config = load_config(ROOT / "config_harvard_scalable.yaml")
+
+    assert config.output_dir == Path("/mnt/noobjam/harvard_tessera_incremental_v3")
+    assert config.raster_chunk_pixels == 256
+    assert config.stac_request_retries == 7
+    assert config.materialize_workers == 4
+
+
 def test_projected_query_halo_expands_bounds_without_changing_shape() -> None:
     original = (1000.0, 2000.0, 21_000.0, 22_000.0)
 

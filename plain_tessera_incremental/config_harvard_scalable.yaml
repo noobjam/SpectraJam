@@ -1,0 +1,45 @@
+input:
+  parquet: /mnt/foundry-az/playground/data/ground_truth/harvard_wkt.parquet
+  crs: EPSG:4326
+
+output_dir: /mnt/noobjam/harvard_tessera_incremental_v3
+
+columns:
+  longitude: LONGITUDE
+  latitude: LATITUDE
+  quadkey: QUADKEY
+  label: landcover
+  wkt: wkt
+  id: id
+
+model:
+  checkpoint_path: checkpoints/tessera_v1_1_mpc_encoder.pt
+  checkpoint_sha256: 5dab0f070d5711034f7c241e841eaeedb49fef90b9355f68c8f20b9507839ec3
+
+temporal:
+  start: 2024-09-01
+  cutoffs: [2025-01-01, 2025-05-01, 2025-09-01, 2026-01-01]
+
+grid:
+  pixel_size_m: 10
+  work_tile_m: 20000
+  # Four times fewer spatial tasks than the old 128-pixel chunks while
+  # bounding a fully occupied task to 65,536 target pixels.
+  raster_chunk_pixels: 256
+
+stac:
+  endpoint: https://planetarycomputer.microsoft.com/api/stac/v1
+  collections:
+    s2: sentinel-2-l2a
+    s1: sentinel-1-rtc
+  # Long enough to ride out transient Azure 429/5xx bursts.
+  request_retries: 7
+  query_halo_m: 500
+
+runtime:
+  device: auto
+  batch_size: 256
+  stack_chunksize: 256
+  # Larger spatial batches provide the speedup; bounded remote concurrency
+  # avoids the request storm produced by the old eight-worker run.
+  materialize_workers: 4

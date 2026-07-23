@@ -11,7 +11,12 @@ from spectrajam.contracts import sha256_file
 
 DEFAULT_CROP_LABELS = ("Bean", "Irish Potato", "Maize", "Rice")
 SOURCE_COLUMNS = ("LONGITUDE", "LATITUDE", "QUADKEY", "landcover", "wkt", "id")
-AUDIT_COLUMNS = ("field_uid", "geometry_status", "center_pixel_count")
+AUDIT_COLUMNS = (
+    "field_uid",
+    "geometry_sha256",
+    "geometry_status",
+    "center_pixel_count",
+)
 
 
 def _require_dependencies() -> dict[str, Any]:
@@ -77,11 +82,32 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     frame["center_pixel_count"] = pd.to_numeric(
         frame["center_pixel_count"], errors="coerce"
     )
-    candidates = frame[
+    qualified = frame[
         frame["geometry_status"].isin({"valid", "repaired"})
         & frame["landcover"].isin(labels)
         & frame["center_pixel_count"].ge(args.min_pixels)
     ].copy()
+    geometry_label_counts = qualified.groupby("geometry_sha256")[
+        "landcover"
+    ].nunique()
+    conflicting_geometries = set(
+        geometry_label_counts[geometry_label_counts.gt(1)].index
+    )
+    conflicting_rows = qualified["geometry_sha256"].isin(conflicting_geometries)
+    candidates = qualified[~conflicting_rows].sort_values(
+        ["landcover", "center_pixel_count", "field_uid"],
+        ascending=[True, False, True],
+        kind="stable",
+    )
+    candidate_count_before_deduplication = len(candidates)
+    candidates = candidates.drop_duplicates(
+        ["landcover", "geometry_sha256"],
+        keep="first",
+    )
+    excluded_candidate_rows = {
+        "cross_label_geometry_conflict": int(conflicting_rows.sum()),
+        "duplicate_geometry": candidate_count_before_deduplication - len(candidates),
+    }
 
     selected_parts = []
     available_field_counts: dict[str, int] = {}
@@ -125,6 +151,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             "max_fields_per_class": args.max_fields_per_class,
             "crop_labels": list(labels),
         },
+        "excluded_candidate_rows": excluded_candidate_rows,
         "available_field_counts": available_field_counts,
         "available_pixel_count_estimates": available_pixel_estimates,
         "selected_field_counts": selected_field_counts,
@@ -142,7 +169,7 @@ def main() -> None:
         "--fields",
         default="/mnt/noobjam/harvard_tessera_incremental_v3/fields.parquet",
     )
-    parser.add_argument("--min-pixels", type=int, default=256)
+    parser.add_argument("--min-pixels", type=int, default=32)
     parser.add_argument("--max-fields-per-class", type=int, default=25)
     parser.add_argument("--crop-labels", nargs="+", default=list(DEFAULT_CROP_LABELS))
     parser.add_argument(

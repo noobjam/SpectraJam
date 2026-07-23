@@ -298,9 +298,10 @@ nohup python -u -m plain_tessera_incremental \
 echo $! > logs/harvard_large_fields_w2.pid
 ```
 
-Defaults retain at most 25 fields per crop class, require at least 256 pixels
-per field, and preserve every 10 m pixel inside each selected polygon. Inspect
-the preparation class counts and preflight `pixels_per_task` before launch.
+Defaults retain at most 25 unique, non-conflicting geometries per crop class,
+require at least 32 pixels per field, and preserve every 10 m pixel inside each
+selected polygon. Inspect the preparation class counts and preflight
+`pixels_per_task` before launch.
 
 ## 12. Common failure handling
 

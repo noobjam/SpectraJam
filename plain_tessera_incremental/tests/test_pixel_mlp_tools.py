@@ -88,9 +88,16 @@ def test_large_field_selector_keeps_largest_fields_per_class_deterministically()
         "Maize": [800, 300],
     }.items():
         for ordinal, count in enumerate(counts):
+            geometry = shapely.box(
+                30.0 + ordinal / 100,
+                -2.0,
+                30.001 + ordinal / 100,
+                -1.999,
+            )
             rows.append(
                 {
                     "field_uid": f"{label}-{ordinal}",
+                    "geometry_sha256": f"{label}-{ordinal}",
                     "geometry_status": (
                         "repaired" if label == "Bean" and ordinal == 1 else "valid"
                     ),
@@ -99,15 +106,33 @@ def test_large_field_selector_keeps_largest_fields_per_class_deterministically()
                     "LATITUDE": -2.0,
                     "QUADKEY": "q",
                     "landcover": label,
-                    "wkt": shapely.box(
-                        30.0 + ordinal / 100,
-                        -2.0,
-                        30.001 + ordinal / 100,
-                        -1.999,
-                    ).wkt,
+                    "wkt": geometry.wkt,
                     "id": f"{label}-{ordinal}",
                 }
             )
+    rows.extend(
+        [
+            {
+                **rows[0],
+                "field_uid": "Bean-duplicate",
+                "id": "Bean-duplicate",
+            },
+            {
+                **rows[0],
+                "field_uid": "Bean-conflict",
+                "geometry_sha256": "cross-label-conflict",
+                "center_pixel_count": 700,
+                "id": "Bean-conflict",
+            },
+            {
+                **rows[3],
+                "field_uid": "Maize-conflict",
+                "geometry_sha256": "cross-label-conflict",
+                "center_pixel_count": 700,
+                "id": "Maize-conflict",
+            },
+        ]
+    )
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         fields = root / "fields.parquet"
@@ -126,6 +151,11 @@ def test_large_field_selector_keeps_largest_fields_per_class_deterministically()
         selected = pd.read_parquet(output)
 
     assert selected["id"].tolist() == ["Bean-0", "Bean-1", "Maize-0", "Maize-1"]
+    assert result["available_field_counts"] == {"Bean": 2, "Maize": 2}
+    assert result["excluded_candidate_rows"] == {
+        "cross_label_geometry_conflict": 2,
+        "duplicate_geometry": 1,
+    }
     assert result["selected_field_counts"] == {"Bean": 2, "Maize": 2}
     assert result["selected_pixel_count_estimates"] == {"Bean": 900, "Maize": 1100}
 

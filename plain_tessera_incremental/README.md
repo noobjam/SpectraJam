@@ -137,9 +137,9 @@ the durable resume unit; temporary group caches are removed only after their
 full timeline has been atomically saved.
 
 For a faster classifier-first run, use the audited `fields.parquet` written
-before v3 remote materialization to select at most 25 large fields per crop
-class. The selected polygons keep all of their 10 m pixels, use 256-pixel AOI
-windows, and download only canonical `w2`.
+before v3 remote materialization to select at most 25 unique, non-conflicting
+large geometries per crop class. The selected polygons keep all of their 10 m
+pixels, use 256-pixel AOI windows, and download only canonical `w2`.
 
 ```bash
 python -m plain_tessera_incremental.tools.prepare_harvard_large_field_input

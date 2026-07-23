@@ -20,6 +20,9 @@ from plain_tessera_incremental.tools.build_pixel_classification_dataset import (
 from plain_tessera_incremental.tools.download_rwanda_worldcover import (
     RWANDA_SOURCE_KEYS,
 )
+from plain_tessera_incremental.tools.prepare_harvard_large_field_input import (
+    prepare as prepare_large_fields,
+)
 from plain_tessera_incremental.tools.prepare_worldcover_noncrop_input import (
     DEFAULT_NONCROP_CODES,
     _keep_smallest,
@@ -76,6 +79,55 @@ def test_patch_geometry_contains_exactly_the_requested_10m_cells() -> None:
         shapely=shapely,
     )
     assert geometry.bounds == (950.0, 1950.0, 1050.0, 2050.0)
+
+
+def test_large_field_selector_keeps_largest_fields_per_class_deterministically() -> None:
+    rows = []
+    for label, counts in {
+        "Bean": [500, 400, 100],
+        "Maize": [800, 300],
+    }.items():
+        for ordinal, count in enumerate(counts):
+            rows.append(
+                {
+                    "field_uid": f"{label}-{ordinal}",
+                    "geometry_status": (
+                        "repaired" if label == "Bean" and ordinal == 1 else "valid"
+                    ),
+                    "center_pixel_count": count,
+                    "LONGITUDE": 30.0 + ordinal / 100,
+                    "LATITUDE": -2.0,
+                    "QUADKEY": "q",
+                    "landcover": label,
+                    "wkt": shapely.box(
+                        30.0 + ordinal / 100,
+                        -2.0,
+                        30.001 + ordinal / 100,
+                        -1.999,
+                    ).wkt,
+                    "id": f"{label}-{ordinal}",
+                }
+            )
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        fields = root / "fields.parquet"
+        output = root / "large.parquet"
+        pd.DataFrame(rows).to_parquet(fields, index=False)
+        result = prepare_large_fields(
+            argparse.Namespace(
+                fields=str(fields),
+                min_pixels=256,
+                max_fields_per_class=2,
+                crop_labels=["Bean", "Maize"],
+                output=str(output),
+                manifest=None,
+            )
+        )
+        selected = pd.read_parquet(output)
+
+    assert selected["id"].tolist() == ["Bean-0", "Bean-1", "Maize-0", "Maize-1"]
+    assert result["selected_field_counts"] == {"Bean": 2, "Maize": 2}
+    assert result["selected_pixel_count_estimates"] == {"Bean": 900, "Maize": 1100}
 
 
 def test_collapse_removes_conflicting_and_invalid_pixel_rows() -> None:

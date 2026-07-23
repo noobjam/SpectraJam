@@ -69,6 +69,14 @@ class WindowTests(unittest.TestCase):
         )
         self.assertEqual([window.window_id for window in config.windows], ["w1", "w2", "w3", "w4"])
 
+    def test_large_field_config_executes_only_canonical_w2(self) -> None:
+        config = load_config(
+            Path(__file__).parents[1] / "config_harvard_large_fields_w2.yaml"
+        )
+        self.assertEqual([window.window_id for window in config.windows], ["w2"])
+        self.assertEqual(config.windows[0].start.isoformat(), "2024-09-01")
+        self.assertEqual(config.windows[0].end_exclusive.isoformat(), "2025-05-01")
+
 
 class GeometryTests(unittest.TestCase):
     def test_pixel_center_rule_and_global_ids(self) -> None:
@@ -164,7 +172,15 @@ class GeometryTests(unittest.TestCase):
                 result = preflight(config)
         self.assertGreater(result["unique_pixel_count"], 0)
         self.assertGreaterEqual(result["estimated_task_count"], 1)
-        self.assertEqual(result["expected_embedding_rows"], result["field_pixel_membership_count"] * 4)
+        self.assertGreaterEqual(result["pixels_per_task"]["minimum"], 1)
+        self.assertGreaterEqual(
+            result["pixels_per_task"]["maximum"],
+            result["pixels_per_task"]["minimum"],
+        )
+        self.assertEqual(
+            result["expected_embedding_rows"],
+            result["field_pixel_membership_count"] * 4,
+        )
 
 
 class PreprocessingTests(unittest.TestCase):

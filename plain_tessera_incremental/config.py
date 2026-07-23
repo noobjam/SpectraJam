@@ -52,6 +52,27 @@ class PipelineConfig:
     quadkey_column: str
 
     def validate(self, require_files: bool = False) -> None:
+        canonical_windows = {
+            "w1": (1, "2024-09-01", "2025-01-01"),
+            "w2": (2, "2024-09-01", "2025-05-01"),
+            "w3": (3, "2024-09-01", "2025-09-01"),
+            "w4": (4, "2024-09-01", "2026-01-01"),
+        }
+        if not self.windows:
+            raise ValueError("at least one canonical temporal window is required")
+        window_ids = [window.window_id for window in self.windows]
+        if len(window_ids) != len(set(window_ids)):
+            raise ValueError("temporal windows must be unique")
+        for window in self.windows:
+            actual = (
+                window.ordinal,
+                window.start.isoformat(),
+                window.end_exclusive.isoformat(),
+            )
+            if canonical_windows.get(window.window_id) != actual:
+                raise ValueError(f"temporal window {window.window_id!r} is not canonical")
+        if window_ids != sorted(window_ids, key=lambda value: canonical_windows[value][0]):
+            raise ValueError("temporal windows must use canonical order")
         if self.source_crs != "EPSG:4326":
             raise ValueError("this pipeline currently requires WKT in EPSG:4326")
         if self.pixel_size_m != 10:
@@ -86,8 +107,6 @@ class PipelineConfig:
             digest = self.checkpoint_sha256.lower()
             if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
                 raise ValueError("checkpoint_sha256 must be null or a hexadecimal SHA-256")
-        if self.windows[-1].end_exclusive.isoformat() != "2026-01-01":
-            raise ValueError("the final cutoff must be 2026-01-01 to include 2025-12-31")
         if require_files:
             if not self.input_parquet.is_file():
                 raise FileNotFoundError(f"ground-truth parquet not found: {self.input_parquet}")
@@ -108,15 +127,27 @@ def load_config(path: str | Path) -> PipelineConfig:
     columns = _mapping(root.get("columns"), "columns")
 
     checksum = model.get("checkpoint_sha256")
+    windows = build_prefix_windows(
+        str(temporal["start"]),
+        [str(value) for value in temporal["cutoffs"]],
+    )
+    include_windows = temporal.get("include_windows")
+    if include_windows is not None:
+        if not isinstance(include_windows, list) or not include_windows:
+            raise ValueError("temporal include_windows must be a non-empty list")
+        included = [str(value) for value in include_windows]
+        unknown = sorted(set(included) - {window.window_id for window in windows})
+        if unknown:
+            raise ValueError(f"temporal include_windows contains unknown IDs: {unknown}")
+        if len(included) != len(set(included)):
+            raise ValueError("temporal include_windows must be unique")
+        windows = tuple(window for window in windows if window.window_id in set(included))
     config = PipelineConfig(
         input_parquet=_resolve_path(str(input_data["parquet"])),
         output_dir=_resolve_path(str(root["output_dir"])),
         checkpoint_path=_resolve_path(str(model["checkpoint_path"])),
         checkpoint_sha256=None if checksum in {None, ""} else str(checksum).lower(),
-        windows=build_prefix_windows(
-            str(temporal["start"]),
-            [str(value) for value in temporal["cutoffs"]],
-        ),
+        windows=windows,
         source_crs=str(input_data.get("crs", "EPSG:4326")),
         pixel_size_m=int(grid.get("pixel_size_m", 10)),
         work_tile_m=int(grid.get("work_tile_m", 20_000)),

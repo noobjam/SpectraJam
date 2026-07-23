@@ -395,7 +395,14 @@ def preflight(config: PipelineConfig) -> dict[str, Any]:
         "chunk_x_index",
         "chunk_y_index",
     ]
-    task_count = int(preflight_memberships.groupby(task_columns).ngroups)
+    task_sizes = preflight_pixels.groupby(task_columns).size()
+    task_count = len(task_sizes)
+    pixels_per_task = {
+        "minimum": int(task_sizes.min()) if task_count else 0,
+        "median": float(task_sizes.median()) if task_count else 0.0,
+        "mean": float(task_sizes.mean()) if task_count else 0.0,
+        "maximum": int(task_sizes.max()) if task_count else 0,
+    }
     runtime = runtime_identity(config)
     checkpoint_sha256 = sha256_file(config.checkpoint_path)
     if config.checkpoint_sha256 and checkpoint_sha256 != config.checkpoint_sha256:
@@ -410,6 +417,7 @@ def preflight(config: PipelineConfig) -> dict[str, Any]:
         "unique_pixel_count": len(preflight_pixels),
         "field_pixel_membership_count": len(preflight_memberships),
         "estimated_task_count": task_count,
+        "pixels_per_task": pixels_per_task,
         "expected_embedding_rows": len(preflight_memberships) * len(config.windows),
         "checkpoint_path": str(config.checkpoint_path),
         "checkpoint_sha256": checkpoint_sha256,

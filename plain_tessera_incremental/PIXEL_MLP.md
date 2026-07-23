@@ -105,7 +105,7 @@ After completion, point the builder at this pilot output:
 
 ```bash
 python -m plain_tessera_incremental.tools.build_pixel_classification_dataset \
-  --crop-root /mnt/noobjam/harvard_tessera_incremental_v3 \
+  --crop-root /mnt/noobjam/harvard_tessera_large_fields_w2 \
   --noncrop-root /mnt/noobjam/rwanda_worldcover_mlp/tessera_embeddings_fast \
   --output /mnt/noobjam/rwanda_worldcover_mlp/pixel_classification_fast_w2.parquet
 ```

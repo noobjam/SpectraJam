@@ -275,7 +275,34 @@ The exact `nohup` command is the resume command. Validated full task timelines
 are skipped. Within an interrupted task, only missing date/orbit groups are
 downloaded again.
 
-## 11. Common failure handling
+## 11. Large-field w2 classifier pilot
+
+The v3 static `fields.parquet` is valid even if remote materialization was
+stopped. Select the largest audited polygons, then run only `w2`:
+
+```bash
+cd /mnt/KSA-Oasis/El-Mohammed/SpectraJam
+source .venv/bin/activate
+
+python -m plain_tessera_incremental.tools.prepare_harvard_large_field_input \
+  | tee logs/harvard_large_fields_w2_prepare.json
+
+python -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_harvard_large_fields_w2.yaml \
+  --preflight-only \
+  | tee logs/harvard_large_fields_w2_preflight.json
+
+nohup python -u -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_harvard_large_fields_w2.yaml \
+  > logs/harvard_large_fields_w2.log 2>&1 < /dev/null &
+echo $! > logs/harvard_large_fields_w2.pid
+```
+
+Defaults retain at most 25 fields per crop class, require at least 256 pixels
+per field, and preserve every 10 m pixel inside each selected polygon. Inspect
+the preparation class counts and preflight `pixels_per_task` before launch.
+
+## 12. Common failure handling
 
 - **Checkpoint SHA mismatch:** stop and provision the exact MPC encoder; do not
   bypass the checksum.

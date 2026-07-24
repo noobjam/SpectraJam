@@ -6,6 +6,7 @@ import platform
 import shutil
 import sys
 from dataclasses import asdict
+from datetime import UTC, date, datetime
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,12 @@ from .geometry import (
     work_tile_for_pixel,
 )
 from .inference import PlainTesseraRunner
-from .materialize import MPCMaterializer, PixelTimelines
+from .materialize import (
+    EPOCH,
+    MPCMaterializer,
+    PixelTimelines,
+    concatenate_timelines,
+)
 from .storage import (
     EMBEDDING_COLUMNS,
     canonical_sha256,
@@ -301,6 +307,11 @@ def _config_fingerprint_payload(config: PipelineConfig) -> dict[str, Any]:
     payload = asdict(config)
     payload["input_parquet"] = str(config.input_parquet)
     payload["output_dir"] = str(config.output_dir)
+    payload["timeline_seed_output"] = (
+        None
+        if config.timeline_seed_output is None
+        else str(config.timeline_seed_output)
+    )
     payload["checkpoint_path"] = str(config.checkpoint_path)
     payload["windows"] = [
         {
@@ -410,10 +421,23 @@ def preflight(config: PipelineConfig) -> dict[str, Any]:
             "TESSERA checkpoint SHA-256 mismatch: "
             f"expected {config.checkpoint_sha256}, got {checkpoint_sha256}"
         )
+    timeline_seed = _timeline_seed_contract(
+        config,
+        sha256_file(config.input_parquet),
+        checkpoint_sha256,
+    )
     return {
         "input_parquet": str(config.input_parquet),
         "input_columns": list(columns),
         "input_rows": len(validation_frame),
+        "timeline_seed": (
+            None
+            if timeline_seed is None
+            else {
+                **timeline_seed,
+                "end_exclusive": timeline_seed["end_exclusive"].isoformat(),
+            }
+        ),
         "unique_pixel_count": len(preflight_pixels),
         "field_pixel_membership_count": len(preflight_memberships),
         "estimated_task_count": task_count,
@@ -449,6 +473,8 @@ def _load_or_materialize(
     grid: RasterWindow,
     rows: np.ndarray,
     columns: np.ndarray,
+    seed_path: Path | None = None,
+    seed_end_exclusive: date | None = None,
 ) -> PixelTimelines:
     if path.is_file():
         cached = PixelTimelines.load(path)
@@ -456,18 +482,193 @@ def _load_or_materialize(
             raise RuntimeError(f"timeline cache pixel order mismatch: {path}")
         shutil.rmtree(group_cache_dir, ignore_errors=True)
         return cached
-    timelines = materializer.materialize(
-        snapshot["s2_items"],
-        snapshot["s1_items"],
-        grid,
-        expected_pixel_ids,
-        rows,
-        columns,
-        group_cache_dir=group_cache_dir,
-    )
+    if seed_path is None:
+        timelines = materializer.materialize(
+            snapshot["s2_items"],
+            snapshot["s1_items"],
+            grid,
+            expected_pixel_ids,
+            rows,
+            columns,
+            group_cache_dir=group_cache_dir,
+        )
+    else:
+        if seed_end_exclusive is None:
+            raise ValueError("seed_end_exclusive is required with seed_path")
+        LOGGER.info(
+            "extending seed timeline after %s: %s",
+            seed_end_exclusive,
+            seed_path,
+        )
+        seed = PixelTimelines.load(seed_path)
+        if seed.pixel_ids != expected_pixel_ids:
+            raise RuntimeError(f"seed timeline pixel order mismatch: {seed_path}")
+        cutoff_day = (seed_end_exclusive - EPOCH).days
+        seed_days = (seed.s2_days, seed.s1a_days, seed.s1d_days)
+        if any(len(days) and int(days.max()) >= cutoff_day for days in seed_days):
+            raise RuntimeError(
+                f"seed timeline contains observations at or after "
+                f"{seed_end_exclusive}: {seed_path}"
+            )
+        extension_snapshot = {
+            "s2_items": [
+                item
+                for item in snapshot["s2_items"]
+                if _stac_item_date(item) >= seed_end_exclusive
+            ],
+            "s1_items": [
+                item
+                for item in snapshot["s1_items"]
+                if _stac_item_date(item) >= seed_end_exclusive
+            ],
+        }
+        extension = materializer.materialize(
+            extension_snapshot["s2_items"],
+            extension_snapshot["s1_items"],
+            grid,
+            expected_pixel_ids,
+            rows,
+            columns,
+            group_cache_dir=group_cache_dir,
+        )
+        extension_days = (
+            extension.s2_days,
+            extension.s1a_days,
+            extension.s1d_days,
+        )
+        if any(len(days) and int(days.min()) < cutoff_day for days in extension_days):
+            raise RuntimeError("timeline extension contains observations before its cutoff")
+        timelines = concatenate_timelines(seed, extension)
     timelines.save(path)
     shutil.rmtree(group_cache_dir, ignore_errors=True)
     return timelines
+
+
+def _stac_item_date(item: dict[str, Any]) -> date:
+    properties = item.get("properties")
+    value = properties.get("datetime") if isinstance(properties, dict) else None
+    if not isinstance(value, str):
+        raise RuntimeError("cached STAC item is missing properties.datetime")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
+            UTC
+        ).date()
+    except ValueError as error:
+        raise RuntimeError(f"cached STAC item has invalid datetime: {value!r}") from error
+
+
+def _timeline_seed_contract(
+    config: PipelineConfig,
+    input_sha256: str,
+    checkpoint_sha256: str,
+) -> dict[str, Any] | None:
+    if config.timeline_seed_output is None:
+        return None
+    root = config.timeline_seed_output
+    run_path = root / "run.json"
+    completion_path = root / "COMPLETED.json"
+    if not run_path.is_file() or not completion_path.is_file():
+        raise RuntimeError(f"timeline seed output is incomplete: {root}")
+    run = json.loads(run_path.read_text())
+    completion = json.loads(completion_path.read_text())
+    if not completion.get("completed"):
+        raise RuntimeError(f"timeline seed output is not completed: {root}")
+    if run.get("input_sha256") != input_sha256:
+        raise RuntimeError("timeline seed input SHA-256 does not match this run")
+    if run.get("checkpoint_sha256") != checkpoint_sha256:
+        raise RuntimeError("timeline seed checkpoint SHA-256 does not match this run")
+    if run.get("preprocessing_version") != PREPROCESSING_VERSION:
+        raise RuntimeError("timeline seed preprocessing version does not match this run")
+
+    seed_config = run.get("config")
+    if not isinstance(seed_config, dict):
+        raise RuntimeError("timeline seed run.json has no config contract")
+    current_config = _config_fingerprint_payload(config)
+    compatibility_keys = (
+        "source_crs",
+        "pixel_size_m",
+        "work_tile_m",
+        "raster_chunk_pixels",
+        "stac_endpoint",
+        "s2_collection",
+        "s1_collection",
+        "stac_query_halo_m",
+        "wkt_column",
+        "id_column",
+        "label_column",
+        "longitude_column",
+        "latitude_column",
+        "quadkey_column",
+    )
+    mismatches = [
+        key
+        for key in compatibility_keys
+        if seed_config.get(key) != current_config.get(key)
+    ]
+    if mismatches:
+        raise RuntimeError(
+            f"timeline seed config is incompatible for keys: {mismatches}"
+        )
+
+    seed_windows = seed_config.get("windows")
+    if not isinstance(seed_windows, list) or not seed_windows:
+        raise RuntimeError("timeline seed has no temporal windows")
+    seed_window = max(seed_windows, key=lambda value: int(value["ordinal"]))
+    matching_window = next(
+        (
+            window
+            for window in config.windows
+            if window.window_id == seed_window.get("window_id")
+            and window.start.isoformat() == seed_window.get("start")
+            and window.end_exclusive.isoformat()
+            == seed_window.get("end_exclusive")
+        ),
+        None,
+    )
+    if matching_window is None:
+        raise RuntimeError("timeline seed window is not part of the target prefixes")
+    return {
+        "output_dir": str(root),
+        "run_fingerprint": str(run["run_fingerprint"]),
+        "window_id": matching_window.window_id,
+        "end_exclusive": matching_window.end_exclusive,
+    }
+
+
+def _timeline_seed_cache(
+    seed: dict[str, Any],
+    task_key: str,
+    expected_rows: int,
+) -> Path:
+    root = Path(seed["output_dir"])
+    shard = (
+        root
+        / "embeddings"
+        / f"window_id={seed['window_id']}"
+        / f"{task_key}.parquet"
+    )
+    if not parquet_matches(
+        shard,
+        {
+            "run_fingerprint": str(seed["run_fingerprint"]),
+            "artifact": "pixel_embeddings",
+            "window_id": str(seed["window_id"]),
+            "task_key": task_key,
+        },
+        expected_rows=expected_rows,
+        required_columns=EMBEDDING_COLUMNS,
+    ):
+        raise RuntimeError(f"timeline seed shard is missing: {shard}")
+    import pyarrow.parquet as pq
+
+    metadata_values = pq.read_metadata(shard).metadata or {}
+    task_fingerprint = metadata_values.get(b"task_fingerprint")
+    if task_fingerprint is None:
+        raise RuntimeError(f"timeline seed shard has no task fingerprint: {shard}")
+    cache_path = root / "cache" / f"{task_fingerprint.decode()}.npz"
+    if not cache_path.is_file():
+        raise RuntimeError(f"timeline seed cache is missing: {cache_path}")
+    return cache_path
 
 
 def _task_shards(config: PipelineConfig, task_key: str) -> dict[str, Path]:
@@ -484,11 +685,24 @@ def run_pipeline(config: PipelineConfig) -> dict[str, Any]:
     checks = preflight(config)
     input_sha256 = sha256_file(config.input_parquet)
     checkpoint_sha256 = str(checks["checkpoint_sha256"])
+    timeline_seed = _timeline_seed_contract(
+        config,
+        input_sha256,
+        checkpoint_sha256,
+    )
     fingerprint_payload = {
         "schema_version": SCHEMA_VERSION,
         "preprocessing_version": PREPROCESSING_VERSION,
         "input_sha256": input_sha256,
         "checkpoint_sha256": checkpoint_sha256,
+        "timeline_seed": (
+            None
+            if timeline_seed is None
+            else {
+                **timeline_seed,
+                "end_exclusive": timeline_seed["end_exclusive"].isoformat(),
+            }
+        ),
         "runtime": checks["runtime"],
         "code_sha256": code_identity(),
         "config": _config_fingerprint_payload(config),
@@ -668,6 +882,15 @@ def run_pipeline(config: PipelineConfig) -> dict[str, Any]:
             verified_embedding_rows += len(task_memberships) * len(config.windows)
             continue
         cache_path = config.output_dir / "cache" / f"{cache_key}.npz"
+        seed_cache_path = (
+            None
+            if timeline_seed is None
+            else _timeline_seed_cache(
+                timeline_seed,
+                task_key,
+                len(task_memberships),
+            )
+        )
         timelines = _load_or_materialize(
             cache_path,
             config.output_dir / "cache" / "groups" / cache_key,
@@ -677,6 +900,12 @@ def run_pipeline(config: PipelineConfig) -> dict[str, Any]:
             grid,
             rows,
             columns,
+            seed_path=seed_cache_path,
+            seed_end_exclusive=(
+                None
+                if timeline_seed is None
+                else timeline_seed["end_exclusive"]
+            ),
         )
         for window in config.windows:
             results = runner.embed_window(timelines, window)

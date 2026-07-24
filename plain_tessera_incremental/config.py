@@ -28,6 +28,7 @@ def _mapping(value: Any, name: str) -> dict[str, Any]:
 class PipelineConfig:
     input_parquet: Path
     output_dir: Path
+    timeline_seed_output: Path | None
     checkpoint_path: Path
     checkpoint_sha256: str | None
     windows: tuple[PrefixWindow, ...]
@@ -103,6 +104,8 @@ class PipelineConfig:
             )
         if self.device not in {"auto", "cpu", "cuda"}:
             raise ValueError("device must be auto, cpu, or cuda")
+        if self.timeline_seed_output == self.output_dir:
+            raise ValueError("timeline_seed_output must differ from output_dir")
         if self.checkpoint_sha256 is not None:
             digest = self.checkpoint_sha256.lower()
             if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
@@ -112,6 +115,13 @@ class PipelineConfig:
                 raise FileNotFoundError(f"ground-truth parquet not found: {self.input_parquet}")
             if not self.checkpoint_path.is_file():
                 raise FileNotFoundError(f"TESSERA checkpoint not found: {self.checkpoint_path}")
+            if (
+                self.timeline_seed_output is not None
+                and not self.timeline_seed_output.is_dir()
+            ):
+                raise FileNotFoundError(
+                    f"timeline seed output not found: {self.timeline_seed_output}"
+                )
 
 
 def load_config(path: str | Path) -> PipelineConfig:
@@ -127,6 +137,7 @@ def load_config(path: str | Path) -> PipelineConfig:
     columns = _mapping(root.get("columns"), "columns")
 
     checksum = model.get("checkpoint_sha256")
+    timeline_seed_output = root.get("timeline_seed_output")
     windows = build_prefix_windows(
         str(temporal["start"]),
         [str(value) for value in temporal["cutoffs"]],
@@ -145,6 +156,11 @@ def load_config(path: str | Path) -> PipelineConfig:
     config = PipelineConfig(
         input_parquet=_resolve_path(str(input_data["parquet"])),
         output_dir=_resolve_path(str(root["output_dir"])),
+        timeline_seed_output=(
+            None
+            if timeline_seed_output in {None, ""}
+            else _resolve_path(str(timeline_seed_output))
+        ),
         checkpoint_path=_resolve_path(str(model["checkpoint_path"])),
         checkpoint_sha256=None if checksum in {None, ""} else str(checksum).lower(),
         windows=windows,

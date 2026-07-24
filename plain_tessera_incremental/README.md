@@ -159,6 +159,26 @@ This writes embeddings to
 preflight before launch; the large-field run should contain many more useful
 pixels per AOI than the all-field run.
 
+After the w2 bootstrap completes, extend the preserved task timelines into all
+four cumulative prefixes without rereading September–April raster data:
+
+```bash
+python -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_harvard_large_fields_all_windows.yaml \
+  --preflight-only
+
+nohup python -u -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_harvard_large_fields_all_windows.yaml \
+  > logs/harvard_large_fields_all_windows.log 2>&1 < /dev/null &
+echo $! > logs/harvard_large_fields_all_windows.pid
+```
+
+The continuation validates every completed w2 task shard and timeline cache,
+uses those cached observations for w1 and w2, downloads only observations from
+`2025-05-01` onward, and writes w1–w4 to
+`/mnt/noobjam/harvard_tessera_large_fields_all_windows`. The original w2 output
+remains unchanged.
+
 The first command must show the VM's intended PyTorch/CUDA build. The install
 intentionally omits the `train` extra so public PyPI cannot replace that
 known-good build; provision PyTorch separately from the VM's matching CUDA

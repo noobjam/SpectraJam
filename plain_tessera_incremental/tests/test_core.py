@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -12,6 +13,7 @@ import numpy as np
 import pandas as pd
 import shapely
 
+from plain_tessera_incremental import PREPROCESSING_VERSION
 from plain_tessera_incremental.catalog import (
     S2_ASSETS,
     detached_item_dicts,
@@ -36,12 +38,16 @@ from plain_tessera_incremental.materialize import (
     NoSpatialCoverageError,
     PixelTimelines,
     _items_intersecting_grid,
+    concatenate_timelines,
     scale_s1_amplitude,
     select_s1_daily_mosaic,
     select_s2_daily_mosaic,
 )
 from plain_tessera_incremental.pipeline import (
+    _config_fingerprint_payload,
     _load_or_materialize,
+    _timeline_seed_cache,
+    _timeline_seed_contract,
     preflight,
     prepare_field_pixels,
 )
@@ -76,6 +82,61 @@ class WindowTests(unittest.TestCase):
         self.assertEqual([window.window_id for window in config.windows], ["w2"])
         self.assertEqual(config.windows[0].start.isoformat(), "2024-09-01")
         self.assertEqual(config.windows[0].end_exclusive.isoformat(), "2025-05-01")
+
+    def test_large_field_all_window_config_reuses_completed_w2_timelines(self) -> None:
+        config = load_config(
+            Path(__file__).parents[1]
+            / "config_harvard_large_fields_all_windows.yaml"
+        )
+        self.assertEqual(
+            [window.window_id for window in config.windows],
+            ["w1", "w2", "w3", "w4"],
+        )
+        self.assertEqual(
+            config.timeline_seed_output,
+            Path("/mnt/noobjam/harvard_tessera_large_fields_w2"),
+        )
+        self.assertEqual(
+            config.output_dir,
+            Path("/mnt/noobjam/harvard_tessera_large_fields_all_windows"),
+        )
+
+    def test_timeline_seed_contract_accepts_the_completed_w2_prefix(self) -> None:
+        config = load_config(
+            Path(__file__).parents[1]
+            / "config_harvard_large_fields_all_windows.yaml"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = replace(config, timeline_seed_output=root)
+            seed_config = replace(
+                target,
+                output_dir=root,
+                timeline_seed_output=None,
+                windows=(target.windows[1],),
+            )
+            (root / "run.json").write_text(
+                json.dumps(
+                    {
+                        "run_fingerprint": "seed-run",
+                        "input_sha256": "input-sha",
+                        "checkpoint_sha256": "checkpoint-sha",
+                        "preprocessing_version": PREPROCESSING_VERSION,
+                        "config": _config_fingerprint_payload(seed_config),
+                    }
+                )
+            )
+            (root / "COMPLETED.json").write_text('{"completed": true}')
+
+            seed = _timeline_seed_contract(
+                target,
+                "input-sha",
+                "checkpoint-sha",
+            )
+
+        self.assertIsNotNone(seed)
+        self.assertEqual(seed["window_id"], "w2")
+        self.assertEqual(seed["end_exclusive"], date(2025, 5, 1))
 
 
 class GeometryTests(unittest.TestCase):
@@ -409,6 +470,41 @@ class InferencePreparationTests(unittest.TestCase):
         self.assertEqual(loaded.pixel_ids, timelines.pixel_ids)
         np.testing.assert_array_equal(loaded.s2_values, timelines.s2_values)
 
+    def test_cumulative_timeline_extension_preserves_seed_and_appends_later_dates(
+        self,
+    ) -> None:
+        seed = PixelTimelines(
+            pixel_ids=("p1",),
+            s2_values=np.full((1, 1, 10), 1, np.uint16),
+            s2_valid=np.ones((1, 1), bool),
+            s2_days=np.array([1], np.int32),
+            s1a_values=np.full((1, 1, 2), 2, np.int16),
+            s1a_valid=np.ones((1, 1), bool),
+            s1a_days=np.array([1], np.int32),
+            s1d_values=np.empty((0, 1, 2), np.int16),
+            s1d_valid=np.empty((0, 1), bool),
+            s1d_days=np.empty(0, np.int32),
+        )
+        extension = PixelTimelines(
+            pixel_ids=("p1",),
+            s2_values=np.full((1, 1, 10), 3, np.uint16),
+            s2_valid=np.ones((1, 1), bool),
+            s2_days=np.array([2], np.int32),
+            s1a_values=np.empty((0, 1, 2), np.int16),
+            s1a_valid=np.empty((0, 1), bool),
+            s1a_days=np.empty(0, np.int32),
+            s1d_values=np.full((1, 1, 2), 4, np.int16),
+            s1d_valid=np.ones((1, 1), bool),
+            s1d_days=np.array([2], np.int32),
+        )
+
+        combined = concatenate_timelines(seed, extension)
+
+        np.testing.assert_array_equal(combined.s2_days, [1, 2])
+        np.testing.assert_array_equal(combined.s2_values[:, 0, 0], [1, 3])
+        np.testing.assert_array_equal(combined.s1a_days, [1])
+        np.testing.assert_array_equal(combined.s1d_days, [2])
+
     def test_full_timeline_replaces_incremental_group_cache(self) -> None:
         timelines = PixelTimelines(
             pixel_ids=("p1",),
@@ -448,8 +544,134 @@ class InferencePreparationTests(unittest.TestCase):
             self.assertFalse(group_cache_dir.exists())
             self.assertEqual(loaded.pixel_ids, ("p1",))
 
+    def test_full_timeline_extends_seed_using_only_later_stac_items(self) -> None:
+        cutoff = date(2025, 5, 1)
+        seed_day = (date(2025, 4, 30) - date(1970, 1, 1)).days
+        extension_day = (cutoff - date(1970, 1, 1)).days
+        seed = PixelTimelines(
+            pixel_ids=("p1",),
+            s2_values=np.full((1, 1, 10), 1, np.uint16),
+            s2_valid=np.ones((1, 1), bool),
+            s2_days=np.array([seed_day], np.int32),
+            s1a_values=np.empty((0, 1, 2), np.int16),
+            s1a_valid=np.empty((0, 1), bool),
+            s1a_days=np.empty(0, np.int32),
+            s1d_values=np.empty((0, 1, 2), np.int16),
+            s1d_valid=np.empty((0, 1), bool),
+            s1d_days=np.empty(0, np.int32),
+        )
+        extension = PixelTimelines(
+            pixel_ids=("p1",),
+            s2_values=np.full((1, 1, 10), 2, np.uint16),
+            s2_valid=np.ones((1, 1), bool),
+            s2_days=np.array([extension_day], np.int32),
+            s1a_values=np.empty((0, 1, 2), np.int16),
+            s1a_valid=np.empty((0, 1), bool),
+            s1a_days=np.empty(0, np.int32),
+            s1d_values=np.empty((0, 1, 2), np.int16),
+            s1d_valid=np.empty((0, 1), bool),
+            s1d_days=np.empty(0, np.int32),
+        )
+
+        class FakeMaterializer:
+            def materialize(
+                self,
+                s2_items,
+                s1_items,
+                *args,
+                group_cache_dir,
+                **kwargs,
+            ):
+                self.s2_items = s2_items
+                self.s1_items = s1_items
+                return extension
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed_path = root / "seed.npz"
+            path = root / "extended.npz"
+            seed.save(seed_path)
+            materializer = FakeMaterializer()
+            loaded = _load_or_materialize(
+                path,
+                root / "groups",
+                ("p1",),
+                materializer,
+                {
+                    "s2_items": [
+                        {"properties": {"datetime": "2025-04-30T08:00:00Z"}},
+                        {"properties": {"datetime": "2025-05-01T08:00:00Z"}},
+                    ],
+                    "s1_items": [
+                        {"properties": {"datetime": "2025-05-02T08:00:00Z"}},
+                    ],
+                },
+                RasterWindow(32631, 0, 0, 1, 1, 10),
+                np.array([0], np.int64),
+                np.array([0], np.int64),
+                seed_path=seed_path,
+                seed_end_exclusive=cutoff,
+            )
+
+        self.assertEqual(len(materializer.s2_items), 1)
+        self.assertEqual(len(materializer.s1_items), 1)
+        np.testing.assert_array_equal(loaded.s2_days, [seed_day, extension_day])
+
 
 class StorageTests(unittest.TestCase):
+    def test_timeline_seed_cache_resolves_from_validated_w2_shard(self) -> None:
+        memberships = pd.DataFrame(
+            {
+                "pixel_position": [0],
+                "field_uid": ["f1"],
+                "source_id": ["1"],
+                "landcover": ["Bean"],
+                "quadkey": ["q"],
+                "pixel_id": ["p1"],
+                "utm_epsg": [32631],
+                "pixel_x_index": [1],
+                "pixel_y_index": [2],
+                "pixel_longitude": [30.0],
+                "pixel_latitude": [-2.0],
+            }
+        )
+        results = WindowEmbeddings(
+            embeddings=np.ones((1, 128), np.float32),
+            outcome=np.array(["complete"]),
+            s2_valid_count=np.array([1], np.int32),
+            s1_valid_count=np.array([1], np.int32),
+            s2_input_count=np.array([8], np.int32),
+            s1_input_count=np.array([8], np.int32),
+            s2_source_count=1,
+            s1_source_count=1,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shard = root / "embeddings" / "window_id=w2" / "task.parquet"
+            write_embedding_shard(
+                memberships,
+                results,
+                PrefixWindow("w2", 2, date(2024, 9, 1), date(2025, 5, 1)),
+                shard,
+                "seed-run",
+                "task",
+                "cache-key",
+            )
+            (root / "cache").mkdir()
+            (root / "cache" / "cache-key.npz").write_bytes(b"cache")
+
+            cache_path = _timeline_seed_cache(
+                {
+                    "output_dir": str(root),
+                    "run_fingerprint": "seed-run",
+                    "window_id": "w2",
+                },
+                "task",
+                1,
+            )
+
+        self.assertEqual(cache_path.name, "cache-key.npz")
+
     def test_null_embedding_round_trips_without_fake_vector(self) -> None:
         import pyarrow.parquet as pq
 

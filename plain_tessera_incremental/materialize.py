@@ -302,6 +302,71 @@ class PixelTimelines:
         return result
 
 
+def concatenate_timelines(
+    seed: PixelTimelines,
+    extension: PixelTimelines,
+) -> PixelTimelines:
+    if seed.pixel_ids != extension.pixel_ids:
+        raise ValueError("timeline extension pixel IDs do not match the seed")
+
+    def concatenate_modality(
+        seed_values: np.ndarray,
+        seed_valid: np.ndarray,
+        seed_days: np.ndarray,
+        extension_values: np.ndarray,
+        extension_valid: np.ndarray,
+        extension_days: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        days = np.concatenate((seed_days, extension_days))
+        if len(np.unique(days)) != len(days):
+            raise ValueError("timeline extension contains duplicate observation days")
+        order = np.argsort(days, kind="stable")
+        return (
+            np.concatenate((seed_values, extension_values), axis=0)[order],
+            np.concatenate((seed_valid, extension_valid), axis=0)[order],
+            days[order],
+        )
+
+    s2_values, s2_valid, s2_days = concatenate_modality(
+        seed.s2_values,
+        seed.s2_valid,
+        seed.s2_days,
+        extension.s2_values,
+        extension.s2_valid,
+        extension.s2_days,
+    )
+    s1a_values, s1a_valid, s1a_days = concatenate_modality(
+        seed.s1a_values,
+        seed.s1a_valid,
+        seed.s1a_days,
+        extension.s1a_values,
+        extension.s1a_valid,
+        extension.s1a_days,
+    )
+    s1d_values, s1d_valid, s1d_days = concatenate_modality(
+        seed.s1d_values,
+        seed.s1d_valid,
+        seed.s1d_days,
+        extension.s1d_values,
+        extension.s1d_valid,
+        extension.s1d_days,
+    )
+    result = PixelTimelines(
+        pixel_ids=seed.pixel_ids,
+        s2_values=s2_values,
+        s2_valid=s2_valid,
+        s2_days=s2_days,
+        s1a_values=s1a_values,
+        s1a_valid=s1a_valid,
+        s1a_days=s1a_days,
+        s1d_values=s1d_values,
+        s1d_valid=s1d_valid,
+        s1d_days=s1d_days,
+    )
+    result.validate()
+    return result
+
+
 class MPCMaterializer:
     def __init__(
         self,

@@ -303,6 +303,28 @@ require at least 32 pixels per field, and preserve every 10 m pixel inside each
 selected polygon. Inspect the preparation class counts and preflight
 `pixels_per_task` before launch.
 
+Once the w2 bootstrap is complete, continue into all cumulative windows while
+reusing its 63 task timelines:
+
+```bash
+python -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_harvard_large_fields_all_windows.yaml \
+  --preflight-only \
+  | tee logs/harvard_large_fields_all_windows_preflight.json
+
+nohup python -u -m plain_tessera_incremental \
+  --config plain_tessera_incremental/config_harvard_large_fields_all_windows.yaml \
+  > logs/harvard_large_fields_all_windows.log 2>&1 < /dev/null &
+echo $! > logs/harvard_large_fields_all_windows.pid
+```
+
+The seed contract fails closed unless the input, checkpoint, preprocessing,
+grid, columns, completed w2 shard, task fingerprint, and timeline pixel order
+match. It reads no raster groups before `2025-05-01`; w1 and w2 are recomputed
+from the seed timelines, while later observations extend the same physical
+pixels for w3 and w4. Output is isolated under
+`/mnt/noobjam/harvard_tessera_large_fields_all_windows`.
+
 ## 12. Common failure handling
 
 - **Checkpoint SHA mismatch:** stop and provision the exact MPC encoder; do not
